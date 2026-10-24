@@ -112,6 +112,25 @@ async def media_url_handler(message: Message, url: str, platform: str):
                     )
                     return
 
+                size_1080 = service.estimate_format_size(meta, "1080")
+                size_720 = service.estimate_format_size(meta, "720")
+                size_360 = service.estimate_format_size(meta, "360")
+                size_audio = service.estimate_format_size(meta, "audio")
+
+                def make_btn_label(quality: str, size: int | None) -> str:
+                    base = {
+                        "1080": "🎬 1080p MP4",
+                        "720": "🎬 720p MP4",
+                        "360": "🎬 360p MP4",
+                        "audio": "🎵 Audio MP3",
+                    }[quality]
+                    if not size:
+                        return base
+                    mb = size / (1024 * 1024)
+                    if size > MAX_STD_BOT_API_PAYLOAD_BYTES:
+                        return f"{base} (~{mb:.0f}MB ⚠️)"
+                    return f"{base} (~{mb:.0f}MB)"
+
                 text = (
                     f"🎬 <b>{meta.title}</b>\n"
                     f"⏱ <b>Duration:</b> {dur_str}\n\n"
@@ -121,18 +140,22 @@ async def media_url_handler(message: Message, url: str, platform: str):
                     inline_keyboard=[
                         [
                             InlineKeyboardButton(
-                                text="🎬 1080p MP4", callback_data=f"yt:1080:{video_id}"
+                                text=make_btn_label("1080", size_1080),
+                                callback_data=f"yt:1080:{video_id}",
                             ),
                             InlineKeyboardButton(
-                                text="🎬 720p MP4", callback_data=f"yt:720:{video_id}"
+                                text=make_btn_label("720", size_720),
+                                callback_data=f"yt:720:{video_id}",
                             ),
                         ],
                         [
                             InlineKeyboardButton(
-                                text="🎬 360p MP4", callback_data=f"yt:360:{video_id}"
+                                text=make_btn_label("360", size_360),
+                                callback_data=f"yt:360:{video_id}",
                             ),
                             InlineKeyboardButton(
-                                text="🎵 Audio MP3", callback_data=f"yt:audio:{video_id}"
+                                text=make_btn_label("audio", size_audio),
+                                callback_data=f"yt:audio:{video_id}",
                             ),
                         ],
                     ]
@@ -168,7 +191,19 @@ async def media_url_handler(message: Message, url: str, platform: str):
             if ext in {".jpg", ".jpeg", ".png", ".webp"}:
                 await message.reply_photo(photo=file_input, caption=caption)
             elif ext in {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac"}:
-                await message.reply_audio(audio=file_input, caption=caption)
+                thumb_input = (
+                    FSInputFile(downloaded.thumbnail_path)
+                    if downloaded.thumbnail_path and downloaded.thumbnail_path.exists()
+                    else None
+                )
+                await message.reply_audio(
+                    audio=file_input,
+                    caption=caption,
+                    title=downloaded.track or downloaded.title,
+                    performer=downloaded.artist or "Unknown Artist",
+                    thumbnail=thumb_input,
+                    duration=downloaded.duration or 0,
+                )
             else:
                 await message.reply_video(
                     video=file_input,
@@ -223,6 +258,24 @@ async def youtube_callback_handler(callback: CallbackQuery):
     }
     label = quality_labels.get(quality, quality)
 
+    # Pre-flight payload size check before starting download
+    try:
+        meta = await service.extract_metadata(url)
+        estimated_size = service.estimate_format_size(meta, quality)
+        if estimated_size and estimated_size > MAX_STD_BOT_API_PAYLOAD_BYTES:
+            mb = estimated_size / (1024 * 1024)
+            await callback.answer(f"⚠️ {label} is too large (~{mb:.0f} MB > 50 MB)", show_alert=True)
+            if callback.message and isinstance(callback.message, Message):
+                await callback.message.edit_text(
+                    f"⚠️ <b>{label}</b> is estimated at ~{mb:.1f} MB, which exceeds Telegram's 50MB limit.\n\n"
+                    "Download was aborted to save server bandwidth.\n"
+                    "Please select 🎬 360p or 🎵 Audio MP3 until Local Bot API (#18) is deployed!",
+                    parse_mode="HTML",
+                )
+            return
+    except Exception as e:
+        logger.warning("Could not pre-estimate size for %s: %s", url, e)
+
     await callback.answer()
     if callback.message and isinstance(callback.message, Message):
         await callback.message.edit_text(f"Downloading YouTube {label}... Please wait ⏳")
@@ -249,9 +302,16 @@ async def youtube_callback_handler(callback: CallbackQuery):
 
             if quality == "audio":
                 if callback.message and isinstance(callback.message, Message):
+                    thumb_input = (
+                        FSInputFile(downloaded.thumbnail_path)
+                        if downloaded.thumbnail_path and downloaded.thumbnail_path.exists()
+                        else None
+                    )
                     await callback.message.reply_audio(
                         audio=file_input,
-                        caption=f"🎵 {downloaded.title}",
+                        title=downloaded.track or downloaded.title,
+                        performer=downloaded.artist or "Unknown Artist",
+                        thumbnail=thumb_input,
                         duration=downloaded.duration or 0,
                     )
             else:

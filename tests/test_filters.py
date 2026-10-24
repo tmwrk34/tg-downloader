@@ -35,6 +35,14 @@ def test_clean_url():
     )
     assert clean_url("  https://example.com/video?a=b  ") == "https://example.com/video?a=b"
     assert clean_url("https://example.com/wiki/Foo_(bar)") == "https://example.com/wiki/Foo_(bar)"
+    assert (
+        clean_url("https://music.youtube.com/watch?v=gGa6UvMkVTM&list=RDAMVMqlj8Rv-8oQk")
+        == "https://music.youtube.com/watch?v=gGa6UvMkVTM"
+    )
+    assert (
+        clean_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ&index=3&list=PL123")
+        == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    )
 
 
 def test_trigger_registry():

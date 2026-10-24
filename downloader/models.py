@@ -12,6 +12,9 @@ class MediaMetadata:
     """Standardized metadata retrieved prior to downloading."""
 
     title: str
+    artist: str | None = None
+    track: str | None = None
+    album: str | None = None
     duration: int | None = None
     thumbnail: str | None = None
     width: int | None = None
@@ -27,6 +30,9 @@ class DownloadedMedia:
 
     filepath: Path
     title: str
+    artist: str | None = None
+    track: str | None = None
+    album: str | None = None
     duration: int | None = None
     thumbnail_path: Path | None = None
     width: int | None = None

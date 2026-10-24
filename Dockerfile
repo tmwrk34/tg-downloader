@@ -1,11 +1,12 @@
 # Use official Python 3.13 slim image
 FROM python:3.13-slim-bookworm
 
-# Install system dependencies including ffmpeg for media transcoding
+# Install system dependencies including ffmpeg for media transcoding and nodejs for yt-dlp JS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     ca-certificates \
     curl \
+    nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv from official binary

@@ -35,7 +35,7 @@ TRAILING_PUNCTUATION = ".,!?:;)'\"]}>"
 
 
 def clean_url(raw_url: str) -> str:
-    """Strip extraneous sentence-ending punctuation from extracted URLs."""
+    """Strip extraneous sentence-ending punctuation and playlist query tracking from extracted URLs."""
     url = raw_url.strip()
     while url and url[-1] in TRAILING_PUNCTUATION:
         # If closing parenthesis or bracket, only strip if unmatched
@@ -44,6 +44,12 @@ def clean_url(raw_url: str) -> str:
         if url[-1] == "]" and url.count("[") >= url.count("]"):
             break
         url = url[:-1]
+
+    # For single video/music links, strip playlist parameters to prevent slow playlist downloads
+    if "/watch?" in url:
+        url = re.sub(r"&list=[^&\s]+", "", url)
+        url = re.sub(r"&index=[^&\s]+", "", url)
+
     return url
 
 
