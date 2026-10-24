@@ -1,12 +1,19 @@
 import asyncio
 import logging
+import re
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import FSInputFile, Message
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from config import load_config
-from downloader import MediaDownloaderCore, PlatformServiceRegistry
+from downloader import MediaDownloaderCore, PlatformServiceRegistry, YouTubeService
 from filters import MediaUrlFilter, TriggerPhraseFilter
 from middlewares import WhitelistMiddleware
 
@@ -43,6 +50,17 @@ dp.callback_query.outer_middleware(
 )
 
 
+def format_duration(seconds: int | None) -> str:
+    """Format duration in seconds to HH:MM:SS or MM:SS."""
+    if not seconds:
+        return "N/A"
+    mins, secs = divmod(seconds, 60)
+    hours, mins = divmod(mins, 60)
+    if hours:
+        return f"{hours:02d}:{mins:02d}:{secs:02d}"
+    return f"{mins:02d}:{secs:02d}"
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message, is_admin: bool = False, is_private: bool = False):
     first_name = message.from_user.first_name if message.from_user else "user"
@@ -62,15 +80,57 @@ async def ping_handler(message: Message, matched_phrase: str = ""):
 @dp.message(MediaUrlFilter())
 async def media_url_handler(message: Message, url: str, platform: str):
     logger.info("Matched %s URL: %s", platform, url)
-    status_msg = await message.reply(f"Downloading {platform.capitalize()} media... Please wait ⏳")
 
     service = platform_registry.get_service_by_name(
         platform
     ) or platform_registry.get_service_for_url(url)
     if not service:
-        await status_msg.edit_text("Unsupported platform.")
+        await message.reply("Unsupported platform.")
         return
 
+    # For YouTube: prompt user with resolution and audio options via inline keyboard
+    if platform == "youtube" and isinstance(service, YouTubeService):
+        vid_match = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([a-zA-Z0-9_-]{11})", url)
+        if vid_match:
+            video_id = vid_match.group(1)
+            status_msg = await message.reply("Fetching YouTube media information... ⏳")
+            try:
+                meta = await service.extract_metadata(url)
+                dur_str = format_duration(meta.duration)
+                text = (
+                    f"🎬 <b>{meta.title}</b>\n"
+                    f"⏱ <b>Duration:</b> {dur_str}\n\n"
+                    "Select download format / quality:"
+                )
+                keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="🎬 1080p MP4", callback_data=f"yt:1080:{video_id}"
+                            ),
+                            InlineKeyboardButton(
+                                text="🎬 720p MP4", callback_data=f"yt:720:{video_id}"
+                            ),
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="🎬 360p MP4", callback_data=f"yt:360:{video_id}"
+                            ),
+                            InlineKeyboardButton(
+                                text="🎵 Audio MP3", callback_data=f"yt:audio:{video_id}"
+                            ),
+                        ],
+                    ]
+                )
+                await status_msg.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+                return
+            except Exception as e:
+                logger.exception("Failed to fetch YouTube info for %s", url)
+                await status_msg.edit_text(f"Failed to fetch YouTube metadata: {e}")
+                return
+
+    # For TikTok, Instagram, and direct platforms: download immediately
+    status_msg = await message.reply(f"Downloading {platform.capitalize()} media... Please wait ⏳")
     try:
         downloaded = await service.download(url)
         async with downloaded:
@@ -95,7 +155,76 @@ async def media_url_handler(message: Message, url: str, platform: str):
             await status_msg.delete()
     except Exception as e:
         logger.exception("Failed to process media URL %s", url)
-        await status_msg.edit_text(f"Failed to download media: {e}")
+        err_str = str(e)
+        if "No video formats found" in err_str:
+            await status_msg.edit_text(
+                "ℹ️ This post contains a photo gallery without a video stream.\n"
+                "Multi-image photo album support is coming soon in Issue #9!"
+            )
+        else:
+            await status_msg.edit_text(f"Failed to download media: {e}")
+
+
+@dp.callback_query(F.data.startswith("yt:"))
+async def youtube_callback_handler(callback: CallbackQuery):
+    if not callback.data:
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.answer("Invalid callback query", show_alert=True)
+        return
+
+    _, quality, video_id = parts
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    service = platform_registry.get_service_by_name("youtube")
+    if not service or not isinstance(service, YouTubeService):
+        await callback.answer("YouTube service unavailable", show_alert=True)
+        return
+
+    quality_labels = {
+        "1080": "1080p MP4",
+        "720": "720p MP4",
+        "360": "360p MP4",
+        "audio": "Audio MP3",
+    }
+    label = quality_labels.get(quality, quality)
+
+    await callback.answer()
+    if callback.message and isinstance(callback.message, Message):
+        await callback.message.edit_text(f"Downloading YouTube {label}... Please wait ⏳")
+
+    try:
+        format_opts = service.get_format_options(quality)
+        downloaded = await service.download(url, extra_opts=format_opts)
+        async with downloaded:
+            caption = f"🎬 {downloaded.title}" if downloaded.title else ""
+            file_input = FSInputFile(downloaded.filepath)
+
+            if quality == "audio":
+                if callback.message and isinstance(callback.message, Message):
+                    await callback.message.reply_audio(
+                        audio=file_input,
+                        caption=f"🎵 {downloaded.title}",
+                        duration=downloaded.duration or 0,
+                    )
+            else:
+                if callback.message and isinstance(callback.message, Message):
+                    await callback.message.reply_video(
+                        video=file_input,
+                        caption=caption,
+                        duration=downloaded.duration or 0,
+                        width=downloaded.width or 0,
+                        height=downloaded.height or 0,
+                        supports_streaming=True,
+                    )
+
+            if callback.message and isinstance(callback.message, Message):
+                await callback.message.delete()
+    except Exception as e:
+        logger.exception("Failed to download YouTube %s for %s", quality, video_id)
+        if callback.message and isinstance(callback.message, Message):
+            await callback.message.edit_text(f"Failed to download YouTube media: {e}")
 
 
 async def main():

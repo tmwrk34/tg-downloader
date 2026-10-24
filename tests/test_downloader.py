@@ -206,6 +206,21 @@ def test_platform_service_adapters(core_downloader: MediaDownloaderCore):
     assert yt.is_supported("https://youtu.be/dQw4w9WgXcQ")
     assert not yt.is_supported("https://instagram.com/reel/C-xyz123/")
 
+    # YouTube format and audio options
+    audio_opts = yt.get_format_options("audio")
+    assert "postprocessors" in audio_opts
+    assert audio_opts["postprocessors"][0]["preferredcodec"] == "mp3"
+
+    res_1080 = yt.get_format_options("1080")
+    assert "1080" in res_1080["format"]
+    assert res_1080["merge_output_format"] == "mp4"
+
+    res_720 = yt.get_format_options("720")
+    assert "720" in res_720["format"]
+
+    res_360 = yt.get_format_options("360")
+    assert "360" in res_360["format"]
+
 
 def test_platform_service_extensibility(core_downloader: MediaDownloaderCore):
     """Verify that adding a new platform requires only creating a new service class."""
