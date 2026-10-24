@@ -11,6 +11,8 @@ from aiogram.types import (
     FSInputFile,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    InputMediaPhoto,
+    InputMediaVideo,
     Message,
 )
 
@@ -110,6 +112,45 @@ async def send_downloaded_media(
             f"Configured bot limit is {limit_mb:.0f} MB."
         )
         return False
+
+    # Gallery / Carousel mode (e.g. Instagram / TikTok albums)
+    if downloaded.is_gallery and downloaded.gallery_items:
+        items = downloaded.gallery_items
+        if len(items) == 1:
+            m_type, path = items[0]
+            file_input = FSInputFile(path)
+            caption = f"🎬 {downloaded.title}" if downloaded.title else ""
+            if m_type == "video":
+                await message.reply_video(
+                    video=file_input, caption=caption, supports_streaming=True
+                )
+            else:
+                await message.reply_photo(photo=file_input, caption=caption)
+        else:
+            chunks = [items[i : i + 10] for i in range(0, len(items), 10)]
+            for chunk_idx, chunk in enumerate(chunks):
+                media_group: list[InputMediaPhoto | InputMediaVideo] = []
+                for item_idx, (m_type, path) in enumerate(chunk):
+                    caption = (
+                        f"🎬 {downloaded.title}"
+                        if (chunk_idx == 0 and item_idx == 0 and downloaded.title)
+                        else None
+                    )
+                    file_input = FSInputFile(path)
+                    if m_type == "video":
+                        media_group.append(InputMediaVideo(media=file_input, caption=caption))
+                    else:
+                        media_group.append(InputMediaPhoto(media=file_input, caption=caption))
+                await message.reply_media_group(media=media_group)
+
+        if downloaded.extra_audio_path and downloaded.extra_audio_path.exists():
+            audio_input = FSInputFile(downloaded.extra_audio_path)
+            await message.reply_audio(
+                audio=audio_input,
+                title=downloaded.track or downloaded.title,
+                performer=downloaded.artist or "Unknown Artist",
+            )
+        return True
 
     caption = f"🎬 {downloaded.title}" if downloaded.title else ""
     file_input = FSInputFile(downloaded.filepath)
@@ -247,14 +288,7 @@ async def media_url_handler(message: Message, url: str, platform: str):
         )
     except Exception as e:
         logger.exception("Failed to process media URL %s", url)
-        err_str = str(e)
-        if "No video formats found" in err_str:
-            await status_msg.edit_text(
-                "ℹ️ This post contains a photo gallery without a video stream.\n"
-                "Multi-image photo album support is coming soon in Issue #9!"
-            )
-        else:
-            await status_msg.edit_text(f"Failed to download media: {e}")
+        await status_msg.edit_text(f"Failed to download media: {e}")
 
 
 @dp.callback_query(F.data.startswith("yt:"))
@@ -348,11 +382,12 @@ async def main():
             config.local_bot_api_url,
         )
         api_server = TelegramAPIServer.from_base(config.local_bot_api_url, is_local=False)
-        session = AiohttpSession(api=api_server)
+        session = AiohttpSession(api=api_server, timeout=1800.0)
         bot = Bot(token=config.bot_token, session=session)
     else:
         logger.info("Using standard Telegram Cloud API (50MB payload limit)")
-        bot = Bot(token=config.bot_token)
+        session = AiohttpSession(timeout=300.0)
+        bot = Bot(token=config.bot_token, session=session)
 
     logger.info("Bot successfully started. Press Ctrl+C to stop.")
     await dp.start_polling(bot)

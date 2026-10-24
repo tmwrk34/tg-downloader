@@ -309,3 +309,140 @@ def test_youtube_extract_video_id():
         == "dQw4w9WgXcQ"
     )
     assert YouTubeService.extract_video_id("https://example.com/not-youtube") is None
+
+
+@pytest.mark.asyncio
+async def test_downloaded_media_gallery_cleanup(tmp_path: Path):
+    job_dir = tmp_path / "job_gallery"
+    job_dir.mkdir()
+    photo1 = job_dir / "p1.jpg"
+    video1 = job_dir / "v1.mp4"
+    photo1.write_bytes(b"image")
+    video1.write_bytes(b"video")
+
+    media = DownloadedMedia(
+        filepath=photo1,
+        title="Gallery Title",
+        temp_dir=job_dir,
+        is_gallery=True,
+        gallery_items=[("photo", photo1), ("video", video1)],
+    )
+
+    assert photo1.exists()
+    assert video1.exists()
+
+    async with media:
+        assert media.is_gallery
+        assert len(media.gallery_items) == 2
+
+    assert not photo1.exists()
+    assert not video1.exists()
+    assert not job_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_core_download_gallery_multi_item(
+    core_downloader: MediaDownloaderCore, tmp_path: Path
+):
+    fake_info = {
+        "title": "Post Carousel",
+        "entries": [
+            {
+                "id": "item1",
+                "formats": [],
+                "thumbnails": [{"url": "https://example.com/item1.jpg", "preference": 1}],
+            },
+            {
+                "id": "item2",
+                "formats": [
+                    {"url": "https://example.com/item2.mp4", "vcodec": "h264", "height": 720}
+                ],
+                "thumbnails": [],
+            },
+        ],
+    }
+
+    with (
+        patch("downloader.core.yt_dlp.YoutubeDL") as mock_ydl_cls,
+        patch("downloader.core.download_url_to_file") as mock_dl,
+    ):
+        instance = MagicMock()
+        instance.extract_info.return_value = fake_info
+        mock_ydl_cls.return_value.__enter__.return_value = instance
+
+        # Simulate writing dummy bytes on download_url_to_file
+        def fake_download_url(url, dest_path):
+            dest_path.write_bytes(b"dummy_content")
+
+        mock_dl.side_effect = fake_download_url
+
+        downloaded = await core_downloader.download("https://instagram.com/p/carousel123")
+        assert downloaded.is_gallery is True
+        assert len(downloaded.gallery_items) == 2
+        assert downloaded.gallery_items[0][0] == "photo"
+        assert downloaded.gallery_items[1][0] == "video"
+        assert downloaded.filesize > 0
+        downloaded.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_core_download_single_photo(core_downloader: MediaDownloaderCore, tmp_path: Path):
+    fake_info = {
+        "id": "single_photo_1",
+        "title": "Solo Photo",
+        "formats": [],
+        "thumbnails": [{"url": "https://example.com/photo.jpg", "preference": 1}],
+    }
+
+    with (
+        patch("downloader.core.yt_dlp.YoutubeDL") as mock_ydl_cls,
+        patch("downloader.core.download_url_to_file") as mock_dl,
+    ):
+        instance = MagicMock()
+        instance.extract_info.return_value = fake_info
+        mock_ydl_cls.return_value.__enter__.return_value = instance
+
+        def fake_download_url(url, dest_path):
+            dest_path.write_bytes(b"photo_content")
+
+        mock_dl.side_effect = fake_download_url
+
+        downloaded = await core_downloader.download("https://instagram.com/p/singlephoto")
+        assert downloaded.is_gallery is False
+        assert downloaded.filepath.name.endswith(".jpg")
+        assert downloaded.filesize > 0
+        downloaded.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_send_downloaded_media_gallery_chunking(tmp_path: Path):
+    from bot import send_downloaded_media
+
+    # Create 14 fake photos
+    items = []
+    for i in range(14):
+        p = tmp_path / f"img_{i:02d}.jpg"
+        p.write_bytes(b"data")
+        items.append(("photo", p))
+
+    downloaded = DownloadedMedia(
+        filepath=items[0][1],
+        title="Big Carousel",
+        filesize=1000,
+        temp_dir=tmp_path,
+        is_gallery=True,
+        gallery_items=items,
+    )
+
+    mock_msg = MagicMock()
+    mock_msg.reply_media_group = MagicMock(return_value=asyncio.Future())
+    mock_msg.reply_media_group.return_value.set_result(True)
+
+    sent = await send_downloaded_media(mock_msg, downloaded)
+    assert sent is True
+    # 14 items should be split into 2 chunks of 10 and 4
+    assert mock_msg.reply_media_group.call_count == 2
+    first_call_media = mock_msg.reply_media_group.call_args_list[0].kwargs["media"]
+    second_call_media = mock_msg.reply_media_group.call_args_list[1].kwargs["media"]
+    assert len(first_call_media) == 10
+    assert len(second_call_media) == 4

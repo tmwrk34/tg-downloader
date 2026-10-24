@@ -3,6 +3,7 @@ import logging
 import re
 import shutil
 import subprocess
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,21 @@ import yt_dlp
 from downloader.models import DownloadedMedia, MediaMetadata
 
 logger = logging.getLogger(__name__)
+
+
+def download_url_to_file(url: str, dest_path: Path, timeout: int = 30) -> None:
+    """Download a remote media URL directly to disk."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+        ),
+        "Accept": "*/*",
+    }
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        with open(dest_path, "wb") as out_file:
+            shutil.copyfileobj(response, out_file)
 
 
 def clean_artist_tag(
@@ -50,6 +66,7 @@ class MediaDownloaderCore:
             "no_warnings": True,
             "noplaylist": True,
             "restrictfilenames": False,
+            "ignore_no_formats_error": True,
         }
 
     def _extract_metadata_sync(
@@ -65,6 +82,10 @@ class MediaDownloaderCore:
             info = ydl.extract_info(url, download=False)
             if not info:
                 raise ValueError(f"No metadata returned for URL: {url}")
+
+            entries = list(info.get("entries") or [])
+            is_gallery = bool(entries)
+            gallery_count = len(entries) if is_gallery else 0
 
             return MediaMetadata(
                 title=info.get("title") or "media",
@@ -82,6 +103,8 @@ class MediaDownloaderCore:
                 filesize=info.get("filesize") or info.get("filesize_approx"),
                 extractor=info.get("extractor") or "",
                 formats=info.get("formats") or [],
+                is_gallery=is_gallery,
+                gallery_count=gallery_count,
             )
 
     async def extract_metadata(
@@ -109,9 +132,85 @@ class MediaDownloaderCore:
         opts.update(merged_opts)
 
         with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+            info = ydl.extract_info(url, download=False)
             if not info:
                 raise ValueError(f"Download returned empty metadata for URL: {url}")
+
+            clean_artist = clean_artist_tag(
+                artist=info.get("artist"),
+                artists=info.get("artists"),
+                uploader=info.get("uploader") or info.get("creator"),
+            )
+            clean_track = info.get("track") or info.get("title")
+            entries = list(info.get("entries") or [])
+
+            # Case 1: Multi-item gallery or carousel (e.g. Instagram carousel)
+            if entries:
+                gallery_items: list[tuple[str, Path]] = []
+                total_filesize = 0
+                for idx, entry in enumerate(entries):
+                    v_formats = [f for f in entry.get("formats", []) if f.get("vcodec") != "none"]
+                    if v_formats:
+                        best_v = max(
+                            v_formats, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0)
+                        )
+                        item_path = temp_dir / f"item_{idx:02d}_{entry.get('id', 'media')}.mp4"
+                        download_url_to_file(best_v["url"], item_path)
+                        total_filesize += item_path.stat().st_size
+                        gallery_items.append(("video", item_path))
+                    elif entry.get("thumbnails"):
+                        best_t = max(
+                            entry["thumbnails"],
+                            key=lambda t: (
+                                t.get("preference") or 0,
+                                (t.get("width") or 0) * (t.get("height") or 0),
+                            ),
+                        )
+                        item_path = temp_dir / f"item_{idx:02d}_{entry.get('id', 'media')}.jpg"
+                        download_url_to_file(best_t["url"], item_path)
+                        total_filesize += item_path.stat().st_size
+                        gallery_items.append(("photo", item_path))
+
+                if gallery_items:
+                    return DownloadedMedia(
+                        filepath=gallery_items[0][1],
+                        title=info.get("title") or "Gallery",
+                        artist=clean_artist,
+                        track=clean_track,
+                        album=info.get("album"),
+                        duration=info.get("duration"),
+                        filesize=total_filesize,
+                        temp_dir=temp_dir,
+                        is_gallery=True,
+                        gallery_items=gallery_items,
+                    )
+
+            # Case 2: Single photo post without video or audio formats
+            v_formats = [f for f in info.get("formats", []) if f.get("vcodec") != "none"]
+            a_formats = [f for f in info.get("formats", []) if f.get("acodec") != "none"]
+            if not v_formats and not a_formats and info.get("thumbnails"):
+                best_t = max(
+                    info["thumbnails"],
+                    key=lambda t: (
+                        t.get("preference") or 0,
+                        (t.get("width") or 0) * (t.get("height") or 0),
+                    ),
+                )
+                photo_path = temp_dir / f"{info.get('id', 'photo')}.jpg"
+                download_url_to_file(best_t["url"], photo_path)
+                return DownloadedMedia(
+                    filepath=photo_path,
+                    title=info.get("title") or "photo",
+                    artist=clean_artist,
+                    track=clean_track,
+                    album=info.get("album"),
+                    duration=info.get("duration"),
+                    filesize=photo_path.stat().st_size,
+                    temp_dir=temp_dir,
+                )
+
+            # Case 3: Standard single video or audio stream
+            ydl.process_info(info)
 
             expected_filepath = Path(ydl.prepare_filename(info))
             if expected_filepath.exists():
