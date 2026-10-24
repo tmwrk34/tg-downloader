@@ -17,11 +17,6 @@ class InstagramService(BasePlatformService):
 
     def get_ytdl_options(self) -> dict[str, Any]:
         return {
-            "format": "best[ext=mp4]/best",
-            "http_headers": {
-                "User-Agent": (
-                    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
-                    "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
-                ),
-            },
+            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+            "merge_output_format": "mp4",
         }
