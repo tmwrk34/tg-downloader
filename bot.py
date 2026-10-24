@@ -13,7 +13,13 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InputMediaPhoto,
     InputMediaVideo,
+    InputRichBlockPhoto,
+    InputRichBlockSlideshow,
+    InputRichBlockUnion,
+    InputRichBlockVideo,
+    InputRichMessage,
     Message,
+    RichBlockCaption,
 )
 
 from config import load_config
@@ -129,19 +135,48 @@ async def send_downloaded_media(
         else:
             chunks = [items[i : i + 10] for i in range(0, len(items), 10)]
             for chunk_idx, chunk in enumerate(chunks):
-                media_group: list[InputMediaPhoto | InputMediaVideo] = []
-                for item_idx, (m_type, path) in enumerate(chunk):
-                    caption = (
-                        f"🎬 {downloaded.title}"
-                        if (chunk_idx == 0 and item_idx == 0 and downloaded.title)
-                        else None
+                caption_str = (
+                    f"🎬 {downloaded.title}" if (chunk_idx == 0 and downloaded.title) else None
+                )
+                sent_rich = False
+                try:
+                    slides: list[InputRichBlockUnion] = []
+                    for m_type, path in chunk:
+                        file_input = FSInputFile(path)
+                        if m_type == "video":
+                            slides.append(
+                                InputRichBlockVideo(video=InputMediaVideo(media=file_input))
+                            )
+                        else:
+                            slides.append(
+                                InputRichBlockPhoto(photo=InputMediaPhoto(media=file_input))
+                            )
+
+                    caption_block = RichBlockCaption(text=caption_str) if caption_str else None
+                    slideshow = InputRichBlockSlideshow(blocks=slides, caption=caption_block)
+                    await message.reply_rich(rich_message=InputRichMessage(blocks=[slideshow]))
+                    sent_rich = True
+                except Exception as e:
+                    logger.warning(
+                        "Failed to send rich slideshow (%s), falling back to media group: %s",
+                        type(e).__name__,
+                        e,
                     )
-                    file_input = FSInputFile(path)
-                    if m_type == "video":
-                        media_group.append(InputMediaVideo(media=file_input, caption=caption))
-                    else:
-                        media_group.append(InputMediaPhoto(media=file_input, caption=caption))
-                await message.reply_media_group(media=media_group)
+
+                if not sent_rich:
+                    media_group: list[InputMediaPhoto | InputMediaVideo] = []
+                    for item_idx, (m_type, path) in enumerate(chunk):
+                        item_caption = caption_str if item_idx == 0 else None
+                        file_input = FSInputFile(path)
+                        if m_type == "video":
+                            media_group.append(
+                                InputMediaVideo(media=file_input, caption=item_caption)
+                            )
+                        else:
+                            media_group.append(
+                                InputMediaPhoto(media=file_input, caption=item_caption)
+                            )
+                    await message.reply_media_group(media=media_group)
 
         if downloaded.extra_audio_path and downloaded.extra_audio_path.exists():
             audio_input = FSInputFile(downloaded.extra_audio_path)
