@@ -10,6 +10,33 @@ services:
     volumes:
       - bot_downloads:/app/downloads
       - bot_data:/app/data
+    depends_on:
+      - telegram-bot-api
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    container_name: telegram-bot-api
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_API_ID=${TELEGRAM_API_ID:-}
+      - TELEGRAM_API_HASH=${TELEGRAM_API_HASH:-}
+      - TELEGRAM_LOCAL=true
+      - TELEGRAM_WORK_DIR=/var/lib/telegram-bot-api
+    volumes:
+      - bot_api_data:/var/lib/telegram-bot-api
+      - bot_downloads:/app/downloads
+    entrypoint: >
+      sh -c 'if [ -z "$$TELEGRAM_API_ID" ] || [ -z "$$TELEGRAM_API_HASH" ]; then
+        echo "TELEGRAM_API_ID or TELEGRAM_API_HASH is not set. Local Telegram Bot API server is idle. Set them in .env to enable 2GB mode.";
+        sleep infinity;
+      else
+        exec /docker-entrypoint.sh;
+      fi'
     logging:
       driver: "json-file"
       options:
@@ -19,4 +46,5 @@ services:
 volumes:
   bot_downloads:
   bot_data:
+  bot_api_data:
 
