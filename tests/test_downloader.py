@@ -210,6 +210,8 @@ def test_platform_service_adapters(core_downloader: MediaDownloaderCore):
     audio_opts = yt.get_format_options("audio")
     assert "postprocessors" in audio_opts
     assert audio_opts["postprocessors"][0]["preferredcodec"] == "mp3"
+    assert any(p.get("key") == "EmbedThumbnail" for p in audio_opts["postprocessors"])
+    assert any(p.get("key") == "FFmpegMetadata" for p in audio_opts["postprocessors"])
 
     res_1080 = yt.get_format_options("1080")
     assert "1080" in res_1080["format"]
@@ -220,6 +222,23 @@ def test_platform_service_adapters(core_downloader: MediaDownloaderCore):
 
     res_360 = yt.get_format_options("360")
     assert "360" in res_360["format"]
+
+    # Size estimation tests
+    meta = MediaMetadata(
+        title="Test Track",
+        duration=180,  # 3 minutes
+        formats=[
+            {"format_id": "1", "height": 1080, "vcodec": "avc1", "filesize": 40_000_000},
+            {"format_id": "2", "height": 720, "vcodec": "avc1", "filesize": 20_000_000},
+        ],
+    )
+    est_1080 = yt.estimate_format_size(meta, "1080")
+    assert est_1080 is not None
+    assert est_1080 > 40_000_000
+
+    est_audio = yt.estimate_format_size(meta, "audio")
+    assert est_audio is not None
+    assert est_audio == int(192 * 1024 / 8 * 180)
 
 
 def test_platform_service_extensibility(core_downloader: MediaDownloaderCore):

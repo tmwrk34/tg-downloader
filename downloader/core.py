@@ -24,7 +24,7 @@ class MediaDownloaderCore:
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
-            "restrictfilenames": True,
+            "restrictfilenames": False,
         }
 
     def _extract_metadata_sync(
@@ -43,6 +43,9 @@ class MediaDownloaderCore:
 
             return MediaMetadata(
                 title=info.get("title") or "media",
+                artist=info.get("artist") or info.get("creator") or info.get("uploader"),
+                track=info.get("track") or info.get("title"),
+                album=info.get("album"),
                 duration=info.get("duration"),
                 thumbnail=info.get("thumbnail"),
                 width=info.get("width"),
@@ -66,11 +69,15 @@ class MediaDownloaderCore:
         temp_dir: Path,
         custom_opts: dict[str, Any] | None,
     ) -> DownloadedMedia:
-        outtmpl = str(temp_dir / "%(id)s.%(ext)s")
         opts = self._build_ytdl_base_opts()
-        opts["outtmpl"] = outtmpl
-        if custom_opts:
-            opts.update(custom_opts)
+
+        filename_template = "%(id)s.%(ext)s"
+        merged_opts = dict(custom_opts) if custom_opts else {}
+        if "outtmpl" in merged_opts:
+            filename_template = merged_opts.pop("outtmpl")
+
+        opts["outtmpl"] = str(temp_dir / filename_template)
+        opts.update(merged_opts)
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -84,7 +91,10 @@ class MediaDownloaderCore:
                 candidates = [
                     f
                     for f in temp_dir.iterdir()
-                    if f.is_file() and not f.name.endswith(".temp") and not f.name.endswith(".part")
+                    if f.is_file()
+                    and not f.name.endswith(".temp")
+                    and not f.name.endswith(".part")
+                    and f.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}
                 ]
                 if candidates:
                     file_path = max(candidates, key=lambda f: f.stat().st_size)
@@ -92,10 +102,25 @@ class MediaDownloaderCore:
                     raise FileNotFoundError(f"Downloaded media file not found in {temp_dir}")
 
             filesize = file_path.stat().st_size
+
+            # Discover downloaded thumbnail cover art if present
+            thumbnail_path: Path | None = None
+            thumb_files = [
+                f
+                for f in temp_dir.iterdir()
+                if f.is_file() and f != file_path and f.suffix.lower() in {".jpg", ".jpeg", ".png"}
+            ]
+            if thumb_files:
+                thumbnail_path = thumb_files[0]
+
             return DownloadedMedia(
                 filepath=file_path,
                 title=info.get("title") or "media",
+                artist=info.get("artist") or info.get("creator") or info.get("uploader"),
+                track=info.get("track") or info.get("title"),
+                album=info.get("album"),
                 duration=info.get("duration"),
+                thumbnail_path=thumbnail_path,
                 width=info.get("width"),
                 height=info.get("height"),
                 filesize=filesize,
