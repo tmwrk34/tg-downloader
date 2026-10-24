@@ -8,11 +8,15 @@ services:
     env_file:
       - .env
     volumes:
-      - ./downloads:/app/downloads
-      - ./data:/app/data
+      - bot_downloads:/app/downloads
+      - bot_data:/app/data
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  bot_downloads:
+  bot_data:
 
