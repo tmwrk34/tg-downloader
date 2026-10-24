@@ -3,9 +3,10 @@ import logging
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.types import FSInputFile, Message
 
 from config import load_config
+from downloader import MediaDownloaderCore, PlatformServiceRegistry
 from filters import MediaUrlFilter, TriggerPhraseFilter
 from middlewares import WhitelistMiddleware
 
@@ -22,8 +23,10 @@ logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 # Load and validate configuration
 config = load_config()
 
-# Initialize dispatcher
+# Initialize dispatcher and core services
 dp = Dispatcher()
+downloader_core = MediaDownloaderCore(download_dir="./downloads")
+platform_registry = PlatformServiceRegistry(downloader_core)
 
 # Register WhitelistMiddleware at the outer layer
 dp.message.outer_middleware(
@@ -59,10 +62,40 @@ async def ping_handler(message: Message, matched_phrase: str = ""):
 @dp.message(MediaUrlFilter())
 async def media_url_handler(message: Message, url: str, platform: str):
     logger.info("Matched %s URL: %s", platform, url)
-    await message.reply(
-        f"Detected {platform.capitalize()} link:\n{url}\n\n"
-        "Media processing pipeline will be connected in the next step."
-    )
+    status_msg = await message.reply(f"Downloading {platform.capitalize()} media... Please wait ⏳")
+
+    service = platform_registry.get_service_by_name(
+        platform
+    ) or platform_registry.get_service_for_url(url)
+    if not service:
+        await status_msg.edit_text("Unsupported platform.")
+        return
+
+    try:
+        downloaded = await service.download(url)
+        async with downloaded:
+            caption = f"🎬 {downloaded.title}" if downloaded.title else ""
+            file_input = FSInputFile(downloaded.filepath)
+            ext = downloaded.filepath.suffix.lower()
+
+            if ext in {".jpg", ".jpeg", ".png", ".webp"}:
+                await message.reply_photo(photo=file_input, caption=caption)
+            elif ext in {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac"}:
+                await message.reply_audio(audio=file_input, caption=caption)
+            else:
+                await message.reply_video(
+                    video=file_input,
+                    caption=caption,
+                    duration=downloaded.duration or 0,
+                    width=downloaded.width or 0,
+                    height=downloaded.height or 0,
+                    supports_streaming=True,
+                )
+
+            await status_msg.delete()
+    except Exception as e:
+        logger.exception("Failed to process media URL %s", url)
+        await status_msg.edit_text(f"Failed to download media: {e}")
 
 
 async def main():
