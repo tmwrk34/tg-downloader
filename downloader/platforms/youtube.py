@@ -27,7 +27,6 @@ class YouTubeService(BasePlatformService):
         if quality == "audio":
             return {
                 "format": "bestaudio/best",
-                "outtmpl": "%(artist,uploader)s - %(track,title)s.%(ext)s",
                 "writethumbnail": True,
                 "postprocessors": [
                     {
@@ -36,11 +35,16 @@ class YouTubeService(BasePlatformService):
                         "preferredquality": "192",
                     },
                     {
+                        "key": "FFmpegThumbnailsConvertor",
+                        "format": "jpg",
+                    },
+                    {
                         "key": "FFmpegMetadata",
                         "add_metadata": True,
                     },
                     {
                         "key": "EmbedThumbnail",
+                        "already_have_thumbnail": True,
                     },
                 ],
             }
