@@ -1,11 +1,12 @@
 import asyncio
 import logging
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
 from aiogram.types import Message
 
 from config import load_config
+from filters import MediaUrlFilter, TriggerPhraseFilter
 from middlewares import WhitelistMiddleware
 
 # Configure logging
@@ -14,6 +15,9 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Suppress verbose event logs for every handled/unhandled update
+logging.getLogger("aiogram.event").setLevel(logging.WARNING)
 
 # Load and validate configuration
 config = load_config()
@@ -47,9 +51,18 @@ async def cmd_start(message: Message, is_admin: bool = False, is_private: bool =
     )
 
 
-@dp.message(F.text.casefold().in_({"ping", "пинг"}))
-async def ping_handler(message: Message):
+@dp.message(TriggerPhraseFilter(category="ping", exact_match=True))
+async def ping_handler(message: Message, matched_phrase: str = ""):
     await message.reply("Pong! 🏓 Alive, well, and comfortably running inside a Raspberry Pi.")
+
+
+@dp.message(MediaUrlFilter())
+async def media_url_handler(message: Message, url: str, platform: str):
+    logger.info("Matched %s URL: %s", platform, url)
+    await message.reply(
+        f"Detected {platform.capitalize()} link:\n{url}\n\n"
+        "Media processing pipeline will be connected in the next step."
+    )
 
 
 async def main():
