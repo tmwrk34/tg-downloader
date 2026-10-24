@@ -22,6 +22,8 @@ class MediaMetadata:
     filesize: int | None = None
     extractor: str = ""
     formats: list[dict[str, Any]] = field(default_factory=list)
+    is_gallery: bool = False
+    gallery_count: int = 0
 
 
 @dataclass
@@ -39,6 +41,9 @@ class DownloadedMedia:
     height: int | None = None
     filesize: int = 0
     temp_dir: Path | None = None
+    is_gallery: bool = False
+    gallery_items: list[tuple[str, Path]] = field(default_factory=list)
+    extra_audio_path: Path | None = None
 
     def cleanup(self) -> None:
         """Deterministically remove temporary media files and directories from disk."""
@@ -48,12 +53,24 @@ class DownloadedMedia:
                 logger.debug("Successfully purged temporary directory: %s", self.temp_dir)
             except Exception as e:
                 logger.warning("Error purging temporary directory %s: %s", self.temp_dir, e)
-        elif self.filepath and self.filepath.exists():
-            try:
-                self.filepath.unlink(missing_ok=True)
-                logger.debug("Successfully purged temporary file: %s", self.filepath)
-            except Exception as e:
-                logger.warning("Error purging temporary file %s: %s", self.filepath, e)
+        else:
+            if self.filepath and self.filepath.exists():
+                try:
+                    self.filepath.unlink(missing_ok=True)
+                    logger.debug("Successfully purged temporary file: %s", self.filepath)
+                except Exception as e:
+                    logger.warning("Error purging temporary file %s: %s", self.filepath, e)
+            for _, item_path in self.gallery_items:
+                if item_path.exists():
+                    try:
+                        item_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            if self.extra_audio_path and self.extra_audio_path.exists():
+                try:
+                    self.extra_audio_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     async def __aenter__(self) -> "DownloadedMedia":
         return self
