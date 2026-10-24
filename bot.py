@@ -1,6 +1,6 @@
 import asyncio
 import logging
-import re
+import time
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -15,13 +15,23 @@ from aiogram.types import (
 )
 
 from config import load_config
-from downloader import MediaDownloaderCore, PlatformServiceRegistry, YouTubeService
+from downloader import (
+    DownloadedMedia,
+    MediaDownloaderCore,
+    MediaMetadata,
+    PlatformServiceRegistry,
+    YouTubeService,
+)
 from filters import MediaUrlFilter, TriggerPhraseFilter
 from middlewares import WhitelistMiddleware
 
 # Payload and runtime safety thresholds
 MAX_VIDEO_DURATION_SECONDS = 3 * 3600  # 3 hours cap
 DOWNLOAD_TIMEOUT_SECONDS = 300  # 5 minutes download timeout
+METADATA_CACHE_TTL_SECONDS = 600  # 10 minutes cache for YouTube metadata
+
+# In-memory metadata cache: video_id -> (timestamp, MediaMetadata)
+_youtube_metadata_cache: dict[str, tuple[float, MediaMetadata]] = {}
 
 # Configure logging
 logging.basicConfig(
@@ -83,6 +93,56 @@ async def ping_handler(message: Message, matched_phrase: str = ""):
     await message.reply("Pong! 🏓 Alive, well, and comfortably running inside a Raspberry Pi.")
 
 
+async def send_downloaded_media(
+    message: Message,
+    downloaded: DownloadedMedia,
+    is_audio_only: bool = False,
+) -> bool:
+    """
+    Validate filesize against configured bot payload limits and send the media.
+    Returns True if media was successfully sent, False if rejected due to size.
+    """
+    if downloaded.filesize > config.max_payload_bytes:
+        filesize_mb = downloaded.filesize / (1024 * 1024)
+        limit_mb = config.max_payload_bytes / (1024 * 1024)
+        await message.edit_text(
+            f"⚠️ Downloaded file is too large ({filesize_mb:.1f} MB).\n"
+            f"Configured bot limit is {limit_mb:.0f} MB."
+        )
+        return False
+
+    caption = f"🎬 {downloaded.title}" if downloaded.title else ""
+    file_input = FSInputFile(downloaded.filepath)
+    ext = downloaded.filepath.suffix.lower()
+
+    if is_audio_only or ext in {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac"}:
+        thumb_input = (
+            FSInputFile(downloaded.thumbnail_path)
+            if downloaded.thumbnail_path and downloaded.thumbnail_path.exists()
+            else None
+        )
+        await message.reply_audio(
+            audio=file_input,
+            title=downloaded.track or downloaded.title,
+            performer=downloaded.artist or "Unknown Artist",
+            thumbnail=thumb_input,
+            duration=downloaded.duration or 0,
+        )
+    elif ext in {".jpg", ".jpeg", ".png", ".webp"}:
+        await message.reply_photo(photo=file_input, caption=caption)
+    else:
+        await message.reply_video(
+            video=file_input,
+            caption=caption,
+            duration=downloaded.duration or 0,
+            width=downloaded.width or 0,
+            height=downloaded.height or 0,
+            supports_streaming=True,
+        )
+
+    return True
+
+
 @dp.message(MediaUrlFilter())
 async def media_url_handler(message: Message, url: str, platform: str):
     logger.info("Matched %s URL: %s", platform, url)
@@ -96,12 +156,12 @@ async def media_url_handler(message: Message, url: str, platform: str):
 
     # For YouTube: prompt user with resolution and audio options via inline keyboard
     if platform == "youtube" and isinstance(service, YouTubeService):
-        vid_match = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([a-zA-Z0-9_-]{11})", url)
-        if vid_match:
-            video_id = vid_match.group(1)
+        video_id = YouTubeService.extract_video_id(url)
+        if video_id:
             status_msg = await message.reply("Fetching YouTube media information... ⏳")
             try:
                 meta = await service.extract_metadata(url)
+                _youtube_metadata_cache[video_id] = (time.monotonic(), meta)
                 dur_str = format_duration(meta.duration)
 
                 # Cap video duration at 3 hours
@@ -176,46 +236,9 @@ async def media_url_handler(message: Message, url: str, platform: str):
             timeout=DOWNLOAD_TIMEOUT_SECONDS,
         )
         async with downloaded:
-            if downloaded.filesize > config.max_payload_bytes:
-                filesize_mb = downloaded.filesize / (1024 * 1024)
-                limit_mb = config.max_payload_bytes / (1024 * 1024)
-                await status_msg.edit_text(
-                    f"⚠️ Downloaded file is too large ({filesize_mb:.1f} MB).\n"
-                    f"Configured bot limit is {limit_mb:.0f} MB."
-                )
-                return
-
-            caption = f"🎬 {downloaded.title}" if downloaded.title else ""
-            file_input = FSInputFile(downloaded.filepath)
-            ext = downloaded.filepath.suffix.lower()
-
-            if ext in {".jpg", ".jpeg", ".png", ".webp"}:
-                await message.reply_photo(photo=file_input, caption=caption)
-            elif ext in {".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac"}:
-                thumb_input = (
-                    FSInputFile(downloaded.thumbnail_path)
-                    if downloaded.thumbnail_path and downloaded.thumbnail_path.exists()
-                    else None
-                )
-                await message.reply_audio(
-                    audio=file_input,
-                    caption=caption,
-                    title=downloaded.track or downloaded.title,
-                    performer=downloaded.artist or "Unknown Artist",
-                    thumbnail=thumb_input,
-                    duration=downloaded.duration or 0,
-                )
-            else:
-                await message.reply_video(
-                    video=file_input,
-                    caption=caption,
-                    duration=downloaded.duration or 0,
-                    width=downloaded.width or 0,
-                    height=downloaded.height or 0,
-                    supports_streaming=True,
-                )
-
-            await status_msg.delete()
+            sent = await send_downloaded_media(status_msg, downloaded)
+            if sent:
+                await status_msg.delete()
     except TimeoutError:
         logger.warning("Download timed out for %s: %s", platform, url)
         await status_msg.edit_text(
@@ -259,9 +282,15 @@ async def youtube_callback_handler(callback: CallbackQuery):
     }
     label = quality_labels.get(quality, quality)
 
-    # Pre-flight payload size check before starting download
+    # Pre-flight payload size check using cached metadata if available
     try:
-        meta = await service.extract_metadata(url)
+        cached = _youtube_metadata_cache.get(video_id)
+        if cached and (time.monotonic() - cached[0]) < METADATA_CACHE_TTL_SECONDS:
+            meta = cached[1]
+        else:
+            meta = await service.extract_metadata(url)
+            _youtube_metadata_cache[video_id] = (time.monotonic(), meta)
+
         estimated_size = service.estimate_format_size(meta, quality)
         if estimated_size and estimated_size > config.max_payload_bytes:
             mb = estimated_size / (1024 * 1024)
@@ -293,46 +322,12 @@ async def youtube_callback_handler(callback: CallbackQuery):
             timeout=DOWNLOAD_TIMEOUT_SECONDS,
         )
         async with downloaded:
-            if downloaded.filesize > config.max_payload_bytes:
-                filesize_mb = downloaded.filesize / (1024 * 1024)
-                limit_mb = config.max_payload_bytes / (1024 * 1024)
-                if callback.message and isinstance(callback.message, Message):
-                    await callback.message.edit_text(
-                        f"⚠️ Downloaded {label} is too large ({filesize_mb:.1f} MB).\n"
-                        f"Configured bot limit is {limit_mb:.0f} MB."
-                    )
-                return
-
-            caption = f"🎬 {downloaded.title}" if downloaded.title else ""
-            file_input = FSInputFile(downloaded.filepath)
-
-            if quality == "audio":
-                if callback.message and isinstance(callback.message, Message):
-                    thumb_input = (
-                        FSInputFile(downloaded.thumbnail_path)
-                        if downloaded.thumbnail_path and downloaded.thumbnail_path.exists()
-                        else None
-                    )
-                    await callback.message.reply_audio(
-                        audio=file_input,
-                        title=downloaded.track or downloaded.title,
-                        performer=downloaded.artist or "Unknown Artist",
-                        thumbnail=thumb_input,
-                        duration=downloaded.duration or 0,
-                    )
-            else:
-                if callback.message and isinstance(callback.message, Message):
-                    await callback.message.reply_video(
-                        video=file_input,
-                        caption=caption,
-                        duration=downloaded.duration or 0,
-                        width=downloaded.width or 0,
-                        height=downloaded.height or 0,
-                        supports_streaming=True,
-                    )
-
             if callback.message and isinstance(callback.message, Message):
-                await callback.message.delete()
+                sent = await send_downloaded_media(
+                    callback.message, downloaded, is_audio_only=(quality == "audio")
+                )
+                if sent:
+                    await callback.message.delete()
     except TimeoutError:
         logger.warning("Download timed out for YouTube %s (%s)", quality, video_id)
         if callback.message and isinstance(callback.message, Message):

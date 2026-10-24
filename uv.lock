@@ -683,7 +683,7 @@ wheels = [
 [[package]]
 name = "tg-downloader"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "aiogram" },
     { name = "python-dotenv" },

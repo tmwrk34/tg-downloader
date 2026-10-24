@@ -24,14 +24,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Copy dependency specifications first to leverage Docker layer caching
 COPY pyproject.toml uv.lock ./
 
-# Install project dependencies without dev packages
-RUN uv sync --frozen --no-dev --no-install-project
-
-# Copy the rest of the project source code
-COPY . .
-
-# Install the project itself
+# Install project dependencies into virtual environment
 RUN uv sync --frozen --no-dev
+
+# Copy the application source code
+COPY . .
 
 # Create non-root user and data directories for runtime security
 RUN useradd -m -u 1000 appuser && \

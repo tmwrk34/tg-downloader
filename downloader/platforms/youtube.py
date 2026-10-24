@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 from downloader.models import MediaMetadata
@@ -7,6 +8,12 @@ from filters.patterns import MEDIA_PATTERNS, Platform
 
 class YouTubeService(BasePlatformService):
     """Platform adapter for YouTube Videos, Shorts, and Audio."""
+
+    @staticmethod
+    def extract_video_id(url: str) -> str | None:
+        """Extract the 11-character YouTube video ID from various URL formats."""
+        match = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([a-zA-Z0-9_-]{11})", url)
+        return match.group(1) if match else None
 
     @property
     def platform_name(self) -> str:

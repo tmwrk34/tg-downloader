@@ -20,12 +20,8 @@ dev = [
     "ruff>=0.8.0",
 ]
 
-[project.scripts]
-tg-downloader = "tg_downloader:main"
-
-[build-system]
-requires = ["uv_build>=0.13.5,<0.14.0"]
-build-backend = "uv_build"
+[tool.uv]
+package = false
 
 [tool.ruff]
 line-length = 100

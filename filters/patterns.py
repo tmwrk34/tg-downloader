@@ -91,7 +91,7 @@ class TriggerRegistry:
 # Default pre-configured trigger registry instance
 default_trigger_registry = TriggerRegistry(
     initial_triggers={
-        "ping": {"ping", "пинг", "pong"},
-        "help": {"help", "помощь", "info"},
+        "ping": {"ping", "pong"},
+        "help": {"help", "info"},
     }
 )
