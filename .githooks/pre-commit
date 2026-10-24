@@ -3,7 +3,7 @@ set -e
 
 # Run linter and formatter checks before committing if tooling is available
 if command -v uv &>/dev/null; then
-    RUNNER="uv run"
+    RUNNER="uv run --active"
 elif command -v ruff &>/dev/null; then
     RUNNER=""
 else

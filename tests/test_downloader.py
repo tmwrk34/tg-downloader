@@ -1,0 +1,238 @@
+import asyncio
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from downloader import (
+    BasePlatformService,
+    DownloadedMedia,
+    InstagramService,
+    MediaDownloaderCore,
+    MediaMetadata,
+    PlatformServiceRegistry,
+    TikTokService,
+    YouTubeService,
+)
+
+
+@pytest.fixture
+def temp_download_dir(tmp_path: Path) -> Path:
+    dl_dir = tmp_path / "downloads"
+    dl_dir.mkdir(parents=True, exist_ok=True)
+    return dl_dir
+
+
+@pytest.fixture
+def core_downloader(temp_download_dir: Path) -> MediaDownloaderCore:
+    return MediaDownloaderCore(download_dir=temp_download_dir)
+
+
+@pytest.mark.asyncio
+async def test_downloaded_media_context_manager_cleanup_on_success(tmp_path: Path):
+    job_dir = tmp_path / "job_success"
+    job_dir.mkdir()
+    media_file = job_dir / "test.mp4"
+    media_file.write_bytes(b"dummy video content")
+
+    media = DownloadedMedia(
+        filepath=media_file,
+        title="Test Title",
+        temp_dir=job_dir,
+    )
+
+    assert media_file.exists()
+    assert job_dir.exists()
+
+    async with media:
+        assert media.filepath.exists()
+        assert media.title == "Test Title"
+
+    # Must be deleted after exiting context block
+    assert not media_file.exists()
+    assert not job_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_downloaded_media_context_manager_cleanup_on_exception(tmp_path: Path):
+    job_dir = tmp_path / "job_error"
+    job_dir.mkdir()
+    media_file = job_dir / "test.mp4"
+    media_file.write_bytes(b"dummy video content")
+
+    media = DownloadedMedia(
+        filepath=media_file,
+        title="Test Error",
+        temp_dir=job_dir,
+    )
+
+    with pytest.raises(RuntimeError, match="Upload failed"):
+        async with media:
+            assert media_file.exists()
+            raise RuntimeError("Upload failed")
+
+    # Must be deterministically deleted even after an exception
+    assert not media_file.exists()
+    assert not job_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_core_cleanup_on_download_failure(core_downloader: MediaDownloaderCore):
+    # Mock yt_dlp to raise an exception during extract_info
+    with patch("downloader.core.yt_dlp.YoutubeDL") as mock_ydl_cls:
+        instance = MagicMock()
+        instance.extract_info.side_effect = Exception("Download failed in yt-dlp")
+        mock_ydl_cls.return_value.__enter__.return_value = instance
+
+        with pytest.raises(Exception, match="Download failed in yt-dlp"):
+            await core_downloader.download("https://example.com/failed")
+
+        # Check that no lingering job_* folders remain in download_dir
+        remaining_dirs = list(core_downloader.download_dir.glob("job_*"))
+        assert len(remaining_dirs) == 0
+
+
+@pytest.mark.asyncio
+async def test_core_extract_metadata(core_downloader: MediaDownloaderCore):
+    fake_info = {
+        "title": "Sample Video",
+        "duration": 42,
+        "thumbnail": "https://example.com/thumb.jpg",
+        "width": 1920,
+        "height": 1080,
+        "filesize": 1234567,
+        "extractor": "youtube",
+        "formats": [{"format_id": "18", "ext": "mp4"}],
+    }
+
+    with patch("downloader.core.yt_dlp.YoutubeDL") as mock_ydl_cls:
+        instance = MagicMock()
+        instance.extract_info.return_value = fake_info
+        mock_ydl_cls.return_value.__enter__.return_value = instance
+
+        meta = await core_downloader.extract_metadata("https://youtu.be/dQw4w9WgXcQ")
+
+        assert isinstance(meta, MediaMetadata)
+        assert meta.title == "Sample Video"
+        assert meta.duration == 42
+        assert meta.width == 1920
+        assert meta.height == 1080
+        assert meta.filesize == 1234567
+        assert meta.extractor == "youtube"
+
+
+@pytest.mark.asyncio
+async def test_core_download_success(core_downloader: MediaDownloaderCore):
+    def fake_extract_info(url, download=True):
+        # Create the dummy downloaded file in the target directory
+        outtmpl = core_downloader.download_dir
+        job_dirs = list(outtmpl.glob("job_*"))
+        target_dir = job_dirs[0] if job_dirs else outtmpl
+        video_file = target_dir / "sample.mp4"
+        video_file.write_bytes(b"dummy-mp4-payload")
+        return {
+            "title": "Downloaded Video",
+            "duration": 60,
+            "width": 1280,
+            "height": 720,
+            "_filename": str(video_file),
+        }
+
+    with patch("downloader.core.yt_dlp.YoutubeDL") as mock_ydl_cls:
+        instance = MagicMock()
+        instance.extract_info.side_effect = fake_extract_info
+        instance.prepare_filename.side_effect = lambda info: info["_filename"]
+        mock_ydl_cls.return_value.__enter__.return_value = instance
+
+        media = await core_downloader.download("https://www.tiktok.com/@user/video/1234567890")
+
+        assert isinstance(media, DownloadedMedia)
+        assert media.title == "Downloaded Video"
+        assert media.filepath.exists()
+        assert media.filesize == len(b"dummy-mp4-payload")
+
+        # Cleanup
+        media.cleanup()
+        assert not media.filepath.exists()
+
+
+@pytest.mark.asyncio
+async def test_non_blocking_event_loop_concurrency(core_downloader: MediaDownloaderCore):
+    """Ensure core downloader executes non-blocking I/O without freezing asyncio."""
+    slow_done = False
+
+    def fake_slow_extract(url, download=False):
+        import time
+
+        time.sleep(0.3)
+        return {"title": "Slow Video"}
+
+    async def background_counter():
+        ticks = 0
+        while not slow_done:
+            await asyncio.sleep(0.05)
+            ticks += 1
+        return ticks
+
+    with patch("downloader.core.yt_dlp.YoutubeDL") as mock_ydl_cls:
+        instance = MagicMock()
+        instance.extract_info.side_effect = fake_slow_extract
+        mock_ydl_cls.return_value.__enter__.return_value = instance
+
+        counter_task = asyncio.create_task(background_counter())
+        await core_downloader.extract_metadata("https://youtube.com/watch?v=slow")
+        slow_done = True
+        ticks = await counter_task
+
+        # Event loop ticked multiple times during the sync sleep in thread
+        assert ticks >= 2
+
+
+def test_platform_service_adapters(core_downloader: MediaDownloaderCore):
+    tiktok = TikTokService(core_downloader)
+    insta = InstagramService(core_downloader)
+    yt = YouTubeService(core_downloader)
+
+    assert tiktok.platform_name == "tiktok"
+    assert tiktok.is_supported("https://vm.tiktok.com/ZM8vABC12/")
+    assert not tiktok.is_supported("https://youtube.com/watch?v=123")
+    assert "format" in tiktok.get_ytdl_options()
+
+    assert insta.platform_name == "instagram"
+    assert insta.is_supported("https://www.instagram.com/reel/C-xyz123/")
+    assert not insta.is_supported("https://vm.tiktok.com/ZM8vABC12/")
+
+    assert yt.platform_name == "youtube"
+    assert yt.is_supported("https://youtu.be/dQw4w9WgXcQ")
+    assert not yt.is_supported("https://instagram.com/reel/C-xyz123/")
+
+
+def test_platform_service_extensibility(core_downloader: MediaDownloaderCore):
+    """Verify that adding a new platform requires only creating a new service class."""
+
+    class CustomPlatformService(BasePlatformService):
+        @property
+        def platform_name(self) -> str:
+            return "custom"
+
+        def is_supported(self, url: str) -> bool:
+            return "custom.platform" in url
+
+        def get_ytdl_options(self) -> dict:
+            return {"format": "custom_best"}
+
+    registry = PlatformServiceRegistry(core_downloader)
+
+    # Initial state does not know custom platform
+    test_url = "https://custom.platform/video/42"
+    assert registry.get_service_for_url(test_url) is None
+
+    # Register custom platform without altering core engine
+    custom_service = CustomPlatformService(core_downloader)
+    registry.register(custom_service)
+
+    matched = registry.get_service_for_url(test_url)
+    assert matched is not None
+    assert matched.platform_name == "custom"
+    assert matched.get_ytdl_options() == {"format": "custom_best"}
+    assert registry.get_service_by_name("custom") is custom_service
