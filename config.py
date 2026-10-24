@@ -69,10 +69,21 @@ def load_config() -> AppConfig:
     all_ids, admin_ids, group_ids = parse_chat_ids(raw_chat_ids)
 
     local_api_url = os.getenv("LOCAL_BOT_API_URL")
-    if local_api_url:
+    api_id = os.getenv("TELEGRAM_API_ID")
+    api_hash = os.getenv("TELEGRAM_API_HASH")
+
+    if local_api_url and local_api_url.strip():
         local_api_url = local_api_url.strip()
-        if not local_api_url:
-            local_api_url = None
+        # In docker environment, rewrite localhost/127.0.0.1 to telegram-bot-api service
+        if "localhost" in local_api_url or "127.0.0.1" in local_api_url:
+            local_api_url = local_api_url.replace("localhost", "telegram-bot-api").replace(
+                "127.0.0.1", "telegram-bot-api"
+            )
+    elif api_id and api_hash and api_id.strip() and api_hash.strip():
+        # Auto-activate local Bot API container when credentials are present
+        local_api_url = "http://telegram-bot-api:8081"
+    else:
+        local_api_url = None
 
     return AppConfig(
         bot_token=token.strip(),
