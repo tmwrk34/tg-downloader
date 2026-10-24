@@ -14,40 +14,23 @@ A Telegram bot for downloading videos
    cd tg-downloader
    ```
 
-2. Create and activate a virtual environment:
+2. Install dependencies using [uv](https://github.com/astral-sh/uv):
 
    ```bash
-   python -m venv venv
+   uv sync
    ```
 
-   Windows:
-
-   ```powershell
-   .\venv\Scripts\activate
-   ```
-
-   Linux/macOS:
+3. Create a `.env` file from example:
 
    ```bash
-   source venv/bin/activate
+   cp .env.example .env
+   # Edit .env with your BOT_TOKEN and ALLOWED_CHAT_IDS
    ```
 
-3. Install dependencies:
+4. Run the bot:
 
    ```bash
-   pip install -r requirements.txt
-   ```
-
-4. Create a `.env` file in the project root:
-
-   ```
-   BOT_TOKEN=your_token_from_BotFather
-   ```
-
-5. Run the bot:
-
-   ```bash
-   python bot.py
+   uv run python bot.py
    ```
 
 ## Docker Deployment

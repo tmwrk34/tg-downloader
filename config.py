@@ -92,7 +92,3 @@ def load_config() -> AppConfig:
         allowed_group_ids=group_ids,
         local_bot_api_url=local_api_url,
     )
-
-
-# Global configuration instance
-config = load_config() if os.getenv("BOT_TOKEN") and os.getenv("ALLOWED_CHAT_IDS") else None

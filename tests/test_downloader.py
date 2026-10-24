@@ -292,3 +292,20 @@ def test_clean_artist_tag():
     assert clean_artist_tag(None, None, "The Prodigy - Topic") == "The Prodigy"
     assert clean_artist_tag(None, None, "Normal Uploader") == "Normal Uploader"
     assert clean_artist_tag(None, None, None) is None
+
+
+def test_youtube_extract_video_id():
+    assert (
+        YouTubeService.extract_video_id("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        == "dQw4w9WgXcQ"
+    )
+    assert YouTubeService.extract_video_id("https://youtu.be/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+    assert (
+        YouTubeService.extract_video_id("https://www.youtube.com/shorts/dQw4w9WgXcQ")
+        == "dQw4w9WgXcQ"
+    )
+    assert (
+        YouTubeService.extract_video_id("https://music.youtube.com/watch?v=dQw4w9WgXcQ")
+        == "dQw4w9WgXcQ"
+    )
+    assert YouTubeService.extract_video_id("https://example.com/not-youtube") is None
