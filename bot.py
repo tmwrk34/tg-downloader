@@ -17,6 +17,11 @@ from downloader import MediaDownloaderCore, PlatformServiceRegistry, YouTubeServ
 from filters import MediaUrlFilter, TriggerPhraseFilter
 from middlewares import WhitelistMiddleware
 
+# Payload and runtime safety thresholds
+MAX_VIDEO_DURATION_SECONDS = 3 * 3600  # 3 hours cap
+MAX_STD_BOT_API_PAYLOAD_BYTES = 50 * 1024 * 1024  # 50 MB standard Telegram Bot API limit
+DOWNLOAD_TIMEOUT_SECONDS = 300  # 5 minutes download timeout
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -97,6 +102,16 @@ async def media_url_handler(message: Message, url: str, platform: str):
             try:
                 meta = await service.extract_metadata(url)
                 dur_str = format_duration(meta.duration)
+
+                # Cap video duration at 3 hours
+                if meta.duration and meta.duration > MAX_VIDEO_DURATION_SECONDS:
+                    await status_msg.edit_text(
+                        f"⚠️ <b>Video is too long:</b> {dur_str}\n"
+                        "Maximum allowed duration is 3 hours to prevent server exhaustion.",
+                        parse_mode="HTML",
+                    )
+                    return
+
                 text = (
                     f"🎬 <b>{meta.title}</b>\n"
                     f"⏱ <b>Duration:</b> {dur_str}\n\n"
@@ -132,8 +147,20 @@ async def media_url_handler(message: Message, url: str, platform: str):
     # For TikTok, Instagram, and direct platforms: download immediately
     status_msg = await message.reply(f"Downloading {platform.capitalize()} media... Please wait ⏳")
     try:
-        downloaded = await service.download(url)
+        downloaded = await asyncio.wait_for(
+            service.download(url),
+            timeout=DOWNLOAD_TIMEOUT_SECONDS,
+        )
         async with downloaded:
+            if downloaded.filesize > MAX_STD_BOT_API_PAYLOAD_BYTES:
+                filesize_mb = downloaded.filesize / 1024 / 1024
+                await status_msg.edit_text(
+                    f"⚠️ Downloaded file is too large ({filesize_mb:.1f} MB).\n"
+                    "Standard Telegram Bot API limits uploads to 50 MB.\n"
+                    "Full files up to 2GB will be available once Local Bot API (#18) is deployed!"
+                )
+                return
+
             caption = f"🎬 {downloaded.title}" if downloaded.title else ""
             file_input = FSInputFile(downloaded.filepath)
             ext = downloaded.filepath.suffix.lower()
@@ -153,6 +180,12 @@ async def media_url_handler(message: Message, url: str, platform: str):
                 )
 
             await status_msg.delete()
+    except TimeoutError:
+        logger.warning("Download timed out for %s: %s", platform, url)
+        await status_msg.edit_text(
+            f"⏱ Download timed out for {platform.capitalize()} (exceeded 5 minutes).\n"
+            "The media stream might be too large or the server connection is slow."
+        )
     except Exception as e:
         logger.exception("Failed to process media URL %s", url)
         err_str = str(e)
@@ -196,8 +229,21 @@ async def youtube_callback_handler(callback: CallbackQuery):
 
     try:
         format_opts = service.get_format_options(quality)
-        downloaded = await service.download(url, extra_opts=format_opts)
+        downloaded = await asyncio.wait_for(
+            service.download(url, extra_opts=format_opts),
+            timeout=DOWNLOAD_TIMEOUT_SECONDS,
+        )
         async with downloaded:
+            if downloaded.filesize > MAX_STD_BOT_API_PAYLOAD_BYTES:
+                filesize_mb = downloaded.filesize / 1024 / 1024
+                if callback.message and isinstance(callback.message, Message):
+                    await callback.message.edit_text(
+                        f"⚠️ Downloaded {label} is too large ({filesize_mb:.1f} MB).\n"
+                        "Standard Telegram Bot API limits uploads to 50 MB.\n"
+                        "Please choose 🎵 Audio MP3 or wait until Local Bot API (#18) is set up!"
+                    )
+                return
+
             caption = f"🎬 {downloaded.title}" if downloaded.title else ""
             file_input = FSInputFile(downloaded.filepath)
 
@@ -221,6 +267,13 @@ async def youtube_callback_handler(callback: CallbackQuery):
 
             if callback.message and isinstance(callback.message, Message):
                 await callback.message.delete()
+    except TimeoutError:
+        logger.warning("Download timed out for YouTube %s (%s)", quality, video_id)
+        if callback.message and isinstance(callback.message, Message):
+            await callback.message.edit_text(
+                f"⏱ Download timed out for {label} (exceeded 5 minutes).\n"
+                "The video stream may be too large or the server connection is slow."
+            )
     except Exception as e:
         logger.exception("Failed to download YouTube %s for %s", quality, video_id)
         if callback.message and isinstance(callback.message, Message):
