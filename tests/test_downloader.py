@@ -480,3 +480,70 @@ async def test_send_downloaded_media_gallery_fallback_to_media_group(tmp_path: P
     second_call_media = mock_msg.reply_media_group.call_args_list[1].kwargs["media"]
     assert len(first_call_media) == 10
     assert len(second_call_media) == 4
+
+
+@pytest.mark.asyncio
+async def test_tiktok_photo_slideshow_download(
+    core_downloader: MediaDownloaderCore, tmp_path: Path
+):
+    svc = TikTokService(core_downloader)
+
+    fake_video_data = {
+        "desc": "Funny Memes",
+        "author": {"nickname": "MemeLord"},
+        "imagePost": {
+            "images": [
+                {"imageURL": {"urlList": ["https://example.com/slide1.jpg"]}},
+                {"imageURL": {"urlList": ["https://example.com/slide2.jpg"]}},
+            ]
+        },
+        "music": {"playUrl": "https://example.com/audio.mp3"},
+    }
+
+    with (
+        patch("downloader.platforms.tiktok.TikTokIE._extract_web_data_and_status") as mock_extract,
+        patch("downloader.platforms.tiktok.download_url_to_file") as mock_dl,
+    ):
+        mock_extract.return_value = (fake_video_data, 0)
+
+        def fake_dl(url, dest_path):
+            dest_path.write_bytes(b"content")
+
+        mock_dl.side_effect = fake_dl
+
+        url = "https://www.tiktok.com/@tow1nner/photo/7650410187165093141"
+        downloaded = await svc.download(url)
+        assert downloaded.is_gallery is True
+        assert len(downloaded.gallery_items) == 2
+        assert downloaded.gallery_items[0][0] == "photo"
+        assert downloaded.extra_audio_path is not None
+        assert downloaded.artist == "MemeLord"
+        downloaded.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_tiktok_photo_slideshow_metadata(
+    core_downloader: MediaDownloaderCore, tmp_path: Path
+):
+    svc = TikTokService(core_downloader)
+
+    fake_video_data = {
+        "desc": "Photo album",
+        "author": {"uniqueId": "user123"},
+        "imagePost": {
+            "images": [
+                {"imageURL": {"urlList": ["https://example.com/slide1.jpg"]}},
+                {"imageURL": {"urlList": ["https://example.com/slide2.jpg"]}},
+                {"imageURL": {"urlList": ["https://example.com/slide3.jpg"]}},
+            ]
+        },
+    }
+
+    with patch("downloader.platforms.tiktok.TikTokIE._extract_web_data_and_status") as mock_extract:
+        mock_extract.return_value = (fake_video_data, 0)
+
+        url = "https://www.tiktok.com/@user/photo/12345"
+        meta = await svc.extract_metadata(url)
+        assert meta.is_gallery is True
+        assert meta.gallery_count == 3
+        assert meta.artist == "user123"
