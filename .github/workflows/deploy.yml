@@ -20,10 +20,16 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           ALLOWED_CHAT_IDS: ${{ vars.ALLOWED_CHAT_IDS || secrets.ALLOWED_CHAT_IDS }}
+          TELEGRAM_API_ID: ${{ vars.TELEGRAM_API_ID || secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ vars.TELEGRAM_API_HASH || secrets.TELEGRAM_API_HASH }}
+          LOCAL_BOT_API_URL: ${{ vars.LOCAL_BOT_API_URL || secrets.LOCAL_BOT_API_URL }}
         run: |
           cat << EOF > .env
           BOT_TOKEN=${BOT_TOKEN}
           ALLOWED_CHAT_IDS=${ALLOWED_CHAT_IDS}
+          TELEGRAM_API_ID=${TELEGRAM_API_ID}
+          TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
+          LOCAL_BOT_API_URL=${LOCAL_BOT_API_URL}
           EOF
           chmod 600 .env
 

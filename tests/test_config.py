@@ -51,6 +51,31 @@ def test_load_config_without_local_bot_api():
         assert cfg.max_payload_bytes == 50 * 1024 * 1024
 
 
+def test_load_config_auto_activate_with_api_credentials():
+    env_mock = {
+        "BOT_TOKEN": "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+        "ALLOWED_CHAT_IDS": "12345",
+        "TELEGRAM_API_ID": "123456",
+        "TELEGRAM_API_HASH": "abcdef123456",
+    }
+    with patch.dict(os.environ, env_mock, clear=True):
+        cfg = load_config()
+        assert cfg.local_bot_api_url == "http://telegram-bot-api:8081"
+        assert cfg.max_payload_bytes == 2000 * 1024 * 1024
+
+
+def test_load_config_rewrite_localhost():
+    env_mock = {
+        "BOT_TOKEN": "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+        "ALLOWED_CHAT_IDS": "12345",
+        "LOCAL_BOT_API_URL": "http://localhost:8081",
+    }
+    with patch.dict(os.environ, env_mock, clear=True):
+        cfg = load_config()
+        assert cfg.local_bot_api_url == "http://telegram-bot-api:8081"
+        assert cfg.max_payload_bytes == 2000 * 1024 * 1024
+
+
 def test_local_bot_api_session_creation():
     from aiogram.client.telegram import TelegramAPIServer
 
