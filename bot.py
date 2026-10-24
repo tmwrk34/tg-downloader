@@ -3,6 +3,8 @@ import logging
 import re
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.filters import CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -19,7 +21,6 @@ from middlewares import WhitelistMiddleware
 
 # Payload and runtime safety thresholds
 MAX_VIDEO_DURATION_SECONDS = 3 * 3600  # 3 hours cap
-MAX_STD_BOT_API_PAYLOAD_BYTES = 50 * 1024 * 1024  # 50 MB standard Telegram Bot API limit
 DOWNLOAD_TIMEOUT_SECONDS = 300  # 5 minutes download timeout
 
 # Configure logging
@@ -127,7 +128,7 @@ async def media_url_handler(message: Message, url: str, platform: str):
                     if not size:
                         return base
                     mb = size / (1024 * 1024)
-                    if size > MAX_STD_BOT_API_PAYLOAD_BYTES:
+                    if size > config.max_payload_bytes:
                         return f"{base} (~{mb:.0f}MB ⚠️)"
                     return f"{base} (~{mb:.0f}MB)"
 
@@ -175,12 +176,12 @@ async def media_url_handler(message: Message, url: str, platform: str):
             timeout=DOWNLOAD_TIMEOUT_SECONDS,
         )
         async with downloaded:
-            if downloaded.filesize > MAX_STD_BOT_API_PAYLOAD_BYTES:
-                filesize_mb = downloaded.filesize / 1024 / 1024
+            if downloaded.filesize > config.max_payload_bytes:
+                filesize_mb = downloaded.filesize / (1024 * 1024)
+                limit_mb = config.max_payload_bytes / (1024 * 1024)
                 await status_msg.edit_text(
                     f"⚠️ Downloaded file is too large ({filesize_mb:.1f} MB).\n"
-                    "Standard Telegram Bot API limits uploads to 50 MB.\n"
-                    "Full files up to 2GB will be available once Local Bot API (#18) is deployed!"
+                    f"Configured bot limit is {limit_mb:.0f} MB."
                 )
                 return
 
@@ -262,14 +263,19 @@ async def youtube_callback_handler(callback: CallbackQuery):
     try:
         meta = await service.extract_metadata(url)
         estimated_size = service.estimate_format_size(meta, quality)
-        if estimated_size and estimated_size > MAX_STD_BOT_API_PAYLOAD_BYTES:
+        if estimated_size and estimated_size > config.max_payload_bytes:
             mb = estimated_size / (1024 * 1024)
-            await callback.answer(f"⚠️ {label} is too large (~{mb:.0f} MB > 50 MB)", show_alert=True)
+            limit_mb = config.max_payload_bytes / (1024 * 1024)
+            await callback.answer(
+                f"⚠️ {label} is too large (~{mb:.0f}MB > {limit_mb:.0f}MB)",
+                show_alert=True,
+            )
             if callback.message and isinstance(callback.message, Message):
                 await callback.message.edit_text(
-                    f"⚠️ <b>{label}</b> is estimated at ~{mb:.1f} MB, which exceeds Telegram's 50MB limit.\n\n"
-                    "Download was aborted to save server bandwidth.\n"
-                    "Please select 🎬 360p or 🎵 Audio MP3 until Local Bot API (#18) is deployed!",
+                    f"⚠️ <b>{label}</b> is estimated at ~{mb:.1f} MB, which exceeds "
+                    f"the bot's configured payload limit ({limit_mb:.0f} MB).\n\n"
+                    "Download was aborted to conserve resources.\n"
+                    "Please select a lower resolution or download the MP3 audio version.",
                     parse_mode="HTML",
                 )
             return
@@ -287,13 +293,13 @@ async def youtube_callback_handler(callback: CallbackQuery):
             timeout=DOWNLOAD_TIMEOUT_SECONDS,
         )
         async with downloaded:
-            if downloaded.filesize > MAX_STD_BOT_API_PAYLOAD_BYTES:
-                filesize_mb = downloaded.filesize / 1024 / 1024
+            if downloaded.filesize > config.max_payload_bytes:
+                filesize_mb = downloaded.filesize / (1024 * 1024)
+                limit_mb = config.max_payload_bytes / (1024 * 1024)
                 if callback.message and isinstance(callback.message, Message):
                     await callback.message.edit_text(
                         f"⚠️ Downloaded {label} is too large ({filesize_mb:.1f} MB).\n"
-                        "Standard Telegram Bot API limits uploads to 50 MB.\n"
-                        "Please choose 🎵 Audio MP3 or wait until Local Bot API (#18) is set up!"
+                        f"Configured bot limit is {limit_mb:.0f} MB."
                     )
                 return
 
@@ -341,7 +347,18 @@ async def youtube_callback_handler(callback: CallbackQuery):
 
 
 async def main():
-    bot = Bot(token=config.bot_token)
+    if config.local_bot_api_url:
+        logger.info(
+            "Configuring local Telegram Bot API server at %s (2GB payload mode enabled)",
+            config.local_bot_api_url,
+        )
+        api_server = TelegramAPIServer.from_base(config.local_bot_api_url, is_local=False)
+        session = AiohttpSession(api=api_server)
+        bot = Bot(token=config.bot_token, session=session)
+    else:
+        logger.info("Using standard Telegram Cloud API (50MB payload limit)")
+        bot = Bot(token=config.bot_token)
+
     logger.info("Bot successfully started. Press Ctrl+C to stop.")
     await dp.start_polling(bot)
 

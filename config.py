@@ -12,6 +12,17 @@ class AppConfig:
     allowed_chat_ids: set[int]
     admin_user_ids: set[int]
     allowed_group_ids: set[int]
+    local_bot_api_url: str | None = None
+
+    @property
+    def max_payload_bytes(self) -> int:
+        """
+        Return the maximum allowable upload payload size in bytes.
+        50MB for default cloud Telegram Bot API, 2000MB (2GB) for local Bot API server.
+        """
+        if self.local_bot_api_url:
+            return 2000 * 1024 * 1024
+        return 50 * 1024 * 1024
 
 
 def parse_chat_ids(raw_ids: str | None) -> tuple[set[int], set[int], set[int]]:
@@ -57,11 +68,18 @@ def load_config() -> AppConfig:
     raw_chat_ids = os.getenv("ALLOWED_CHAT_IDS")
     all_ids, admin_ids, group_ids = parse_chat_ids(raw_chat_ids)
 
+    local_api_url = os.getenv("LOCAL_BOT_API_URL")
+    if local_api_url:
+        local_api_url = local_api_url.strip()
+        if not local_api_url:
+            local_api_url = None
+
     return AppConfig(
         bot_token=token.strip(),
         allowed_chat_ids=all_ids,
         admin_user_ids=admin_ids,
         allowed_group_ids=group_ids,
+        local_bot_api_url=local_api_url,
     )
 
 
