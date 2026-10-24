@@ -415,10 +415,11 @@ async def test_core_download_single_photo(core_downloader: MediaDownloaderCore, 
 
 
 @pytest.mark.asyncio
-async def test_send_downloaded_media_gallery_chunking(tmp_path: Path):
+async def test_send_downloaded_media_gallery_rich_slideshow(tmp_path: Path):
+    from unittest.mock import AsyncMock
+
     from bot import send_downloaded_media
 
-    # Create 14 fake photos
     items = []
     for i in range(14):
         p = tmp_path / f"img_{i:02d}.jpg"
@@ -435,12 +436,45 @@ async def test_send_downloaded_media_gallery_chunking(tmp_path: Path):
     )
 
     mock_msg = MagicMock()
-    mock_msg.reply_media_group = MagicMock(return_value=asyncio.Future())
-    mock_msg.reply_media_group.return_value.set_result(True)
+    mock_msg.reply_rich = AsyncMock(return_value=True)
+    mock_msg.reply_media_group = AsyncMock(return_value=True)
 
     sent = await send_downloaded_media(mock_msg, downloaded)
     assert sent is True
-    # 14 items should be split into 2 chunks of 10 and 4
+    # Successfully sent via reply_rich (2 chunks: 10 and 4)
+    assert mock_msg.reply_rich.call_count == 2
+    assert mock_msg.reply_media_group.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_send_downloaded_media_gallery_fallback_to_media_group(tmp_path: Path):
+    from unittest.mock import AsyncMock
+
+    from bot import send_downloaded_media
+
+    items = []
+    for i in range(14):
+        p = tmp_path / f"img_{i:02d}.jpg"
+        p.write_bytes(b"data")
+        items.append(("photo", p))
+
+    downloaded = DownloadedMedia(
+        filepath=items[0][1],
+        title="Big Carousel",
+        filesize=1000,
+        temp_dir=tmp_path,
+        is_gallery=True,
+        gallery_items=items,
+    )
+
+    mock_msg = MagicMock()
+    mock_msg.reply_rich = AsyncMock(side_effect=Exception("Rich message method not supported"))
+    mock_msg.reply_media_group = AsyncMock(return_value=True)
+
+    sent = await send_downloaded_media(mock_msg, downloaded)
+    assert sent is True
+    # Failed on reply_rich, fell back to reply_media_group
+    assert mock_msg.reply_rich.call_count == 2
     assert mock_msg.reply_media_group.call_count == 2
     first_call_media = mock_msg.reply_media_group.call_args_list[0].kwargs["media"]
     second_call_media = mock_msg.reply_media_group.call_args_list[1].kwargs["media"]
