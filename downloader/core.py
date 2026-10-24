@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import re
 import shutil
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
@@ -10,6 +12,29 @@ import yt_dlp
 from downloader.models import DownloadedMedia, MediaMetadata
 
 logger = logging.getLogger(__name__)
+
+
+def clean_artist_tag(
+    artist: str | None,
+    artists: list[str] | None = None,
+    uploader: str | None = None,
+) -> str | None:
+    """Clean and deduplicate artist strings, stripping auto-generated YouTube channel artifacts."""
+    if artists:
+        deduped = list(dict.fromkeys([a.strip() for a in artists if a and a.strip()]))
+        if deduped:
+            return ", ".join(deduped)
+    if artist:
+        parts = [p.strip() for p in artist.split(",") if p.strip()]
+        deduped = list(dict.fromkeys(parts))
+        if deduped:
+            return ", ".join(deduped)
+    if uploader:
+        u = uploader.strip()
+        if u.endswith(" - Topic"):
+            u = u[:-8].strip()
+        return u
+    return None
 
 
 class MediaDownloaderCore:
@@ -43,7 +68,11 @@ class MediaDownloaderCore:
 
             return MediaMetadata(
                 title=info.get("title") or "media",
-                artist=info.get("artist") or info.get("creator") or info.get("uploader"),
+                artist=clean_artist_tag(
+                    artist=info.get("artist"),
+                    artists=info.get("artists"),
+                    uploader=info.get("uploader") or info.get("creator"),
+                ),
                 track=info.get("track") or info.get("title"),
                 album=info.get("album"),
                 duration=info.get("duration"),
@@ -103,7 +132,30 @@ class MediaDownloaderCore:
 
             filesize = file_path.stat().st_size
 
-            # Discover downloaded thumbnail cover art if present
+            clean_artist = clean_artist_tag(
+                artist=info.get("artist"),
+                artists=info.get("artists"),
+                uploader=info.get("uploader") or info.get("creator"),
+            )
+            clean_track = info.get("track") or info.get("title")
+
+            # For audio downloads, rename output file to clean 'Artist - Track.ext'
+            if file_path.suffix.lower() in {".mp3", ".m4a", ".flac", ".ogg", ".opus"}:
+                clean_title_part = clean_track or info.get("title") or "Audio"
+                if clean_artist:
+                    new_filename = f"{clean_artist} - {clean_title_part}{file_path.suffix.lower()}"
+                else:
+                    new_filename = f"{clean_title_part}{file_path.suffix.lower()}"
+                safe_name = re.sub(r'[\\/*?:"<>|]', "", new_filename)
+                renamed_path = temp_dir / safe_name
+                if renamed_path != file_path and not renamed_path.exists():
+                    try:
+                        file_path.rename(renamed_path)
+                        file_path = renamed_path
+                    except OSError:
+                        pass
+
+            # Discover downloaded thumbnail cover art if present (.jpg, .jpeg, .png)
             thumbnail_path: Path | None = None
             thumb_files = [
                 f
@@ -112,12 +164,33 @@ class MediaDownloaderCore:
             ]
             if thumb_files:
                 thumbnail_path = thumb_files[0]
+            else:
+                # If only .webp thumbnail exists, convert it to .jpg using ffmpeg
+                webp_files = [
+                    f
+                    for f in temp_dir.iterdir()
+                    if f.is_file() and f != file_path and f.suffix.lower() == ".webp"
+                ]
+                if webp_files:
+                    webp_file = webp_files[0]
+                    jpg_target = webp_file.with_suffix(".jpg")
+                    try:
+                        subprocess.run(
+                            ["ffmpeg", "-y", "-i", str(webp_file), str(jpg_target)],
+                            check=False,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        if jpg_target.exists():
+                            thumbnail_path = jpg_target
+                    except Exception:
+                        logger.warning("Failed to convert webp thumbnail to jpg for %s", file_path)
 
             return DownloadedMedia(
                 filepath=file_path,
                 title=info.get("title") or "media",
-                artist=info.get("artist") or info.get("creator") or info.get("uploader"),
-                track=info.get("track") or info.get("title"),
+                artist=clean_artist,
+                track=clean_track,
                 album=info.get("album"),
                 duration=info.get("duration"),
                 thumbnail_path=thumbnail_path,

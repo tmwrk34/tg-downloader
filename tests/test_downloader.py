@@ -14,6 +14,7 @@ from downloader import (
     TikTokService,
     YouTubeService,
 )
+from downloader.core import clean_artist_tag
 
 
 @pytest.fixture
@@ -270,3 +271,24 @@ def test_platform_service_extensibility(core_downloader: MediaDownloaderCore):
     assert matched.platform_name == "custom"
     assert matched.get_ytdl_options() == {"format": "custom_best"}
     assert registry.get_service_by_name("custom") is custom_service
+
+
+def test_clean_artist_tag():
+    assert (
+        clean_artist_tag(
+            "Atari Teenage Riot, Atari Teenage Riot",
+            ["Atari Teenage Riot", "Atari Teenage Riot"],
+        )
+        == "Atari Teenage Riot"
+    )
+    assert (
+        clean_artist_tag(
+            "Daft Punk, Pharrell Williams",
+            ["Daft Punk", "Pharrell Williams"],
+        )
+        == "Daft Punk, Pharrell Williams"
+    )
+    assert clean_artist_tag("Band Name, Band Name") == "Band Name"
+    assert clean_artist_tag(None, None, "The Prodigy - Topic") == "The Prodigy"
+    assert clean_artist_tag(None, None, "Normal Uploader") == "Normal Uploader"
+    assert clean_artist_tag(None, None, None) is None
