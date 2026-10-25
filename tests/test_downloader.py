@@ -15,6 +15,7 @@ from downloader import (
     YouTubeService,
 )
 from downloader.core import clean_artist_tag
+from downloader.platforms.tiktok import resolve_tiktok_url
 
 
 @pytest.fixture
@@ -547,3 +548,70 @@ async def test_tiktok_photo_slideshow_metadata(
         assert meta.is_gallery is True
         assert meta.gallery_count == 3
         assert meta.artist == "user123"
+
+
+def test_resolve_tiktok_url():
+    # Non-shortlink URL should return immediately without network call
+    reg_url = "https://www.tiktok.com/@user/video/12345"
+    assert resolve_tiktok_url(reg_url) == reg_url
+
+    # Mock shortlink redirect
+    mock_resp = MagicMock()
+    mock_resp.geturl.return_value = "https://www.tiktok.com/@roller_055/photo/7700307198781492488"
+    mock_resp.__enter__.return_value = mock_resp
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        res = resolve_tiktok_url("https://vt.tiktok.com/ZSgxuBW5a/")
+        assert res == "https://www.tiktok.com/@roller_055/photo/7700307198781492488"
+
+    # Exception should fall back to original URL
+    with patch("urllib.request.urlopen", side_effect=Exception("network err")):
+        fallback = resolve_tiktok_url("https://vt.tiktok.com/ZSgxuBW5a/")
+        assert fallback == "https://vt.tiktok.com/ZSgxuBW5a/"
+
+
+@pytest.mark.asyncio
+async def test_tiktok_shortlink_routes_to_photo_slideshow(
+    core_downloader: MediaDownloaderCore, tmp_path: Path
+):
+    svc = TikTokService(core_downloader)
+
+    resolved_photo_url = "https://www.tiktok.com/@roller_055/photo/7700307198781492488"
+    fake_downloaded = DownloadedMedia(
+        filepath=tmp_path / "slide_00.jpg",
+        title="Photo Slideshow",
+        is_gallery=True,
+        gallery_items=[("photo", tmp_path / "slide_00.jpg")],
+    )
+
+    with (
+        patch(
+            "downloader.platforms.tiktok.resolve_tiktok_url", return_value=resolved_photo_url
+        ) as mock_resolve,
+        patch.object(
+            svc, "_download_photo_slideshow_sync", return_value=fake_downloaded
+        ) as mock_ss,
+    ):
+        res = await svc.download("https://vt.tiktok.com/ZSgxuBW5a/")
+        mock_resolve.assert_called_once_with("https://vt.tiktok.com/ZSgxuBW5a/")
+        mock_ss.assert_called_once_with(resolved_photo_url)
+        assert res.is_gallery is True
+
+
+def test_core_cookie_detection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    core = MediaDownloaderCore(download_dir=tmp_path)
+
+    # 1. Test COOKIES_FILE env var
+    cookie_file = tmp_path / "custom_cookies.txt"
+    cookie_file.write_text("# Netscape HTTP Cookie File", encoding="utf-8")
+    monkeypatch.setenv("COOKIES_FILE", str(cookie_file))
+    assert core._get_cookie_file() == str(cookie_file.resolve())
+    opts = core._build_ytdl_base_opts()
+    assert opts.get("cookiefile") == str(cookie_file.resolve())
+
+    # 2. Test INSTAGRAM_COOKIES env var writing to /tmp/cookies.txt
+    monkeypatch.delenv("COOKIES_FILE")
+    monkeypatch.setenv("INSTAGRAM_COOKIES", "# IG Cookies Raw")
+    cookie_path = core._get_cookie_file()
+    assert cookie_path is not None
+    assert Path(cookie_path).read_text(encoding="utf-8") == "# IG Cookies Raw"

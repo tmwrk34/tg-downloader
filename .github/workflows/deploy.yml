@@ -33,6 +33,17 @@ jobs:
           EOF
           chmod 600 .env
 
+      - name: Configure cookies
+        env:
+          INSTAGRAM_COOKIES: ${{ secrets.INSTAGRAM_COOKIES || secrets.COOKIES || secrets.COOKIES_TXT }}
+        run: |
+          mkdir -p data
+          if [ -n "$INSTAGRAM_COOKIES" ]; then
+            printf '%s\n' "$INSTAGRAM_COOKIES" > data/cookies.txt
+            chmod 600 data/cookies.txt
+            echo "Successfully configured cookies.txt in data/"
+          fi
+
       - name: Build and start container
         run: |
           docker compose build --pull

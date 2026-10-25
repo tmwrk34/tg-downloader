@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -60,14 +61,45 @@ class MediaDownloaderCore:
         self.download_dir = Path(download_dir).resolve()
         self.download_dir.mkdir(parents=True, exist_ok=True)
 
+    def _get_cookie_file(self) -> str | None:
+        """Locate an existing cookie file or generate one from environment variables."""
+        env_file = os.getenv("COOKIES_FILE")
+        if env_file and Path(env_file).is_file():
+            return str(Path(env_file).resolve())
+
+        raw_cookies = os.getenv("INSTAGRAM_COOKIES") or os.getenv("COOKIES")
+        if raw_cookies and raw_cookies.strip():
+            tmp_path = Path("/tmp/cookies.txt")
+            try:
+                tmp_path.write_text(raw_cookies.strip(), encoding="utf-8")
+                return str(tmp_path)
+            except Exception as e:
+                logger.warning("Could not write cookies to /tmp/cookies.txt: %s", e)
+
+        candidates = [
+            Path("/app/data/cookies.txt"),
+            Path("./data/cookies.txt"),
+            Path("./cookies.txt"),
+            Path("/tmp/cookies.txt"),
+        ]
+        for c in candidates:
+            if c.is_file():
+                return str(c.resolve())
+
+        return None
+
     def _build_ytdl_base_opts(self) -> dict[str, Any]:
-        return {
+        opts: dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
             "restrictfilenames": False,
             "ignore_no_formats_error": True,
         }
+        cookie_file = self._get_cookie_file()
+        if cookie_file:
+            opts["cookiefile"] = cookie_file
+        return opts
 
     def _extract_metadata_sync(
         self,
