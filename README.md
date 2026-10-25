@@ -19,6 +19,10 @@ A high-performance Telegram bot built with **aiogram 3** and **yt-dlp** for down
   - **YouTube Shorts (`/shorts/`)**: Direct, instant download in the highest available quality without prompting.
   - **Standard Videos (`/watch?v=...`, `youtu.be/...`)**: Interactive inline keyboard to choose resolutions (`1080p`, `720p`, `360p`) or extract audio (`🎵 Audio MP3` with thumbnail cover and tags).
   - Automatically cleans tracking parameters and playlist arguments (`&list=...`, `&index=...`).
+- **Pinterest**:
+  - Supports standard image pins, video pins, and multi-page idea pin (story/carousel) albums.
+  - Automatically resolves shortlinks (`pin.it/...`) with in-memory LRU caching.
+  - Native yt-dlp extraction with automatic direct API scraper fallback for unauthenticated image and story pins.
 
 ### 🚀 2GB Upload Mode
 - Bundled **local Telegram Bot API server** container (`aiogram/telegram-bot-api:latest`) configured via `docker-compose.yml`.

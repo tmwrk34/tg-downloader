@@ -3,6 +3,7 @@ from downloader.models import DownloadedMedia, MediaMetadata
 from downloader.platforms import (
     BasePlatformService,
     InstagramService,
+    PinterestService,
     PlatformServiceRegistry,
     TikTokService,
     YouTubeService,
@@ -14,6 +15,7 @@ __all__ = [
     "InstagramService",
     "MediaDownloaderCore",
     "MediaMetadata",
+    "PinterestService",
     "PlatformServiceRegistry",
     "TikTokService",
     "YouTubeService",

@@ -9,6 +9,7 @@ class Platform(StrEnum):
     TIKTOK = "tiktok"
     INSTAGRAM = "instagram"
     YOUTUBE = "youtube"
+    PINTEREST = "pinterest"
 
 
 # Compiled regular expressions for supported media platforms.
@@ -26,6 +27,11 @@ MEDIA_PATTERNS: dict[Platform, re.Pattern[str]] = {
     Platform.YOUTUBE: re.compile(
         r"https?://(?:(?:www|m|music)\.)?youtube\.com/(?:watch\?[^\s<>\"']*v=[a-zA-Z0-9_-]+|shorts/[a-zA-Z0-9_-]+|live/[a-zA-Z0-9_-]+|embed/[a-zA-Z0-9_-]+)[^\s<>\"']*"
         r"|https?://youtu\.be/[a-zA-Z0-9_-]+[^\s<>\"']*",
+        re.IGNORECASE,
+    ),
+    Platform.PINTEREST: re.compile(
+        r"https?://(?:(?:www|[a-z]{2})\.)?pinterest\.(?:com|co\.[a-z]{2}|[a-z]{2})/pin/(?:[\w-]+--)?\d+[^\s<>\"']*"
+        r"|https?://(?:www\.)?pin\.it/[a-zA-Z0-9]+[^\s<>\"']*",
         re.IGNORECASE,
     ),
 }

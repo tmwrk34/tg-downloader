@@ -279,7 +279,7 @@ async def cmd_start(message: Message, is_admin: bool = False, is_private: bool =
 
     await message.answer(
         f"Hello, {first_name}! 👋{status_suffix}\n\n"
-        "🎬 <b>Media Downloader:</b> Send any supported TikTok, Instagram, or YouTube link.\n"
+        "🎬 <b>Media Downloader:</b> Send any supported TikTok, Instagram, YouTube, or Pinterest link.\n"
         "🎲 <b>Dice Roller:</b> Use <code>/roll [expression]</code> (e.g. <code>2d6+3</code>, <code>4d6k3</code>) or type dice in chat!\n"
         "🔒 <b>Secret Rolls:</b> Use <code>/dmroll [expression]</code> for hidden rolls.\n"
         "✨ <b>Inline Mode:</b> Type <code>@bot</code> in any chat to roll dice.\n"
@@ -297,6 +297,7 @@ HELP_MANUAL_HTML = (
     "• <b>Instagram:</b> Reels, Posts, and Carousel albums (<code>/reel/</code>, <code>/p/</code>).\n"
     "• <b>YouTube Shorts:</b> Instant direct video download.\n"
     "• <b>YouTube Videos:</b> Quality selector (1080p, 720p, 360p) or MP3 audio extraction with album art.\n"
+    "• <b>Pinterest:</b> Images, video pins, idea pin carousels, and short links (<code>pin.it</code>).\n"
     "• <b>Payload Limit:</b> Up to <b>2GB</b> supported via local Bot API server!\n\n"
     "🎲 <b>Tabletop Dice Roller:</b>\n"
     "• <code>/roll [expression]</code> (aliases: <code>/ролл</code>, <code>/кинь</code>, <code>/кидок</code>) — roll dice publicly (defaults to d20).\n"
