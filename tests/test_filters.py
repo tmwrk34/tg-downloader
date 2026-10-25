@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 from aiogram.types import Chat, Message, User
@@ -187,3 +188,19 @@ async def test_media_url_filter_non_media_urls():
     assert await filter_obj(create_message(text="https://example.org/index.html")) is False
     assert await filter_obj(create_message(text="Just some plain text without links")) is False
     assert await filter_obj(create_message(text=None, caption=None)) is False
+
+
+@pytest.mark.asyncio
+async def test_help_handler():
+    from unittest.mock import patch
+
+    from bot import HELP_MANUAL_HTML, help_command_handler
+
+    msg = create_message(text="/help")
+    with patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply:
+        await help_command_handler(msg)
+        mock_reply.assert_called_once()
+        args, kwargs = mock_reply.call_args
+        assert HELP_MANUAL_HTML in args
+        assert kwargs.get("parse_mode") == "HTML"
+        assert kwargs.get("reply_markup") is not None
