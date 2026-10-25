@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 def download_url_to_file(url: str, dest_path: Path, timeout: int = 30) -> None:
-    """Download a remote media URL directly to disk."""
+    """Download a remote media URL directly to disk with a 64KB streaming buffer."""
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -28,7 +28,10 @@ def download_url_to_file(url: str, dest_path: Path, timeout: int = 30) -> None:
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as response:
         with open(dest_path, "wb") as out_file:
-            shutil.copyfileobj(response, out_file)
+            shutil.copyfileobj(response, out_file, length=65536)
+
+
+_last_written_raw_cookies: str | None = None
 
 
 def clean_artist_tag(
@@ -60,18 +63,34 @@ class MediaDownloaderCore:
     def __init__(self, download_dir: Path | str = "./downloads") -> None:
         self.download_dir = Path(download_dir).resolve()
         self.download_dir.mkdir(parents=True, exist_ok=True)
+        self._cleanup_stale_jobs()
+
+    def _cleanup_stale_jobs(self) -> None:
+        """Purge any orphaned job_* directories left over from previous interrupted runs."""
+        try:
+            for item in self.download_dir.glob("job_*"):
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                    logger.info("Purged stale temporary job directory on startup: %s", item)
+        except Exception as e:
+            logger.debug("Could not sweep stale job directories in %s: %s", self.download_dir, e)
 
     def _get_cookie_file(self) -> str | None:
-        """Locate an existing cookie file or generate one from environment variables."""
+        """Locate an existing cookie file or initialize one from environment variables."""
+        global _last_written_raw_cookies
+
         env_file = os.getenv("COOKIES_FILE")
         if env_file and Path(env_file).is_file():
             return str(Path(env_file).resolve())
 
         raw_cookies = os.getenv("INSTAGRAM_COOKIES") or os.getenv("COOKIES")
         if raw_cookies and raw_cookies.strip():
+            stripped = raw_cookies.strip()
             tmp_path = Path("/tmp/cookies.txt")
             try:
-                tmp_path.write_text(raw_cookies.strip(), encoding="utf-8")
+                if _last_written_raw_cookies != stripped or not tmp_path.is_file():
+                    tmp_path.write_text(stripped, encoding="utf-8")
+                    _last_written_raw_cookies = stripped
                 return str(tmp_path)
             except Exception as e:
                 logger.warning("Could not write cookies to /tmp/cookies.txt: %s", e)
@@ -95,6 +114,9 @@ class MediaDownloaderCore:
             "noplaylist": True,
             "restrictfilenames": False,
             "ignore_no_formats_error": True,
+            "socket_timeout": 30,
+            "concurrent_fragment_downloads": 2,
+            "postprocessor_args": {"ffmpeg": ["-threads", "2"]},
         }
         cookie_file = self._get_cookie_file()
         if cookie_file:
@@ -119,6 +141,19 @@ class MediaDownloaderCore:
             is_gallery = bool(entries)
             gallery_count = len(entries) if is_gallery else 0
 
+            # Retain only the lightweight fields needed for size estimation to prevent RAM bloat
+            slim_formats = [
+                {
+                    "height": f.get("height"),
+                    "vcodec": f.get("vcodec"),
+                    "acodec": f.get("acodec"),
+                    "filesize": f.get("filesize"),
+                    "filesize_approx": f.get("filesize_approx"),
+                }
+                for f in (info.get("formats") or [])
+                if isinstance(f, dict)
+            ]
+
             return MediaMetadata(
                 title=info.get("title") or "media",
                 artist=clean_artist_tag(
@@ -134,7 +169,7 @@ class MediaDownloaderCore:
                 height=int(round(info["height"])) if info.get("height") is not None else None,
                 filesize=info.get("filesize") or info.get("filesize_approx"),
                 extractor=info.get("extractor") or "",
-                formats=info.get("formats") or [],
+                formats=slim_formats,
                 is_gallery=is_gallery,
                 gallery_count=gallery_count,
             )
@@ -267,13 +302,6 @@ class MediaDownloaderCore:
 
             filesize = file_path.stat().st_size
 
-            clean_artist = clean_artist_tag(
-                artist=info.get("artist"),
-                artists=info.get("artists"),
-                uploader=info.get("uploader") or info.get("creator"),
-            )
-            clean_track = info.get("track") or info.get("title")
-
             # For audio downloads, rename output file to clean 'Artist - Track.ext'
             if file_path.suffix.lower() in {".mp3", ".m4a", ".flac", ".ogg", ".opus"}:
                 clean_title_part = clean_track or info.get("title") or "Audio"
@@ -311,8 +339,17 @@ class MediaDownloaderCore:
                     jpg_target = webp_file.with_suffix(".jpg")
                     try:
                         subprocess.run(
-                            ["ffmpeg", "-y", "-i", str(webp_file), str(jpg_target)],
+                            [
+                                "ffmpeg",
+                                "-y",
+                                "-threads",
+                                "2",
+                                "-i",
+                                str(webp_file),
+                                str(jpg_target),
+                            ],
                             check=False,
+                            timeout=30,
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
                         )

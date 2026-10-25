@@ -25,10 +25,12 @@ A high-performance Telegram bot built with **aiogram 3** and **yt-dlp** for down
 - Bypasses the default Telegram cloud 50MB bot upload limit, enabling file transfers up to **2000MB (2GB)**.
 - Automatically activated when `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` are provided in the environment.
 
-### ⚡ High-Speed Caching Layer
-- **Instant Media Redelivery**: Caches Telegram `file_id` for uploaded videos, photos, audios, and carousel albums in a persistent SQLite WAL database (`data/media_cache.db`).
+### ⚡ High-Speed Caching Layer & Bounded Concurrency
+- **Instant Media Redelivery**: Caches Telegram `file_id` for uploaded videos, photos, audios, and carousel albums in a two-tier cache (in-memory L1 LRU cache + persistent SQLite WAL database at `data/media_cache.db`).
 - **Zero I/O Cache Hits**: Bypasses `yt-dlp` and `ffmpeg` transcoding on duplicate or reposted URLs, delivering media within milliseconds (< 200ms).
-- **Aggressive URL Normalization**: Automatically strips platform tracking parameters (`?igsh=...`, `?si=...`, `?rpxt=...`, `&utm_source=...`) and resolves shortlinks (`vt.tiktok.com`, `vm.tiktok.com`) so different share links pointing to the same media map to the same cache key.
+- **Bounded Worker Queue & Singleflight Deduplication**: Limits simultaneous `yt-dlp` downloads (`MAX_CONCURRENT_DOWNLOADS=2`) and `ffmpeg` transcodes (`MAX_CONCURRENT_TRANSCODES=1`) via asyncio semaphores so Raspberry Pi CPU/RAM are never exhausted during burst traffic, while keeping `/roll`, `/help`, and cached links instantaneous. Simultaneous requests for the exact same link are deduplicated via a singleflight lock.
+- **Native Telegram Queue Feedback**: Reacts with `⏳` when a request enters the queue, transitions to `⚡` with periodic `ChatAction` (`uploading video...` / `recording voice...`) during active processing, and clears reactions upon completion.
+- **Aggressive URL Normalization**: Automatically strips platform tracking parameters (`?igsh=...`, `?si=...`, `?rpxt=...`, `&utm_source=...`) and resolves shortlinks (`vt.tiktok.com`, `vm.tiktok.com`) with an in-memory LRU cache so different share links pointing to the same media map to the same cache key.
 - **Graceful Error Recovery**: If a cached `file_id` is invalidated or expired by Telegram, the bot purges the entry and falls back to a fresh download automatically.
 
 ### 🎲 Tabletop D&D Dice Roller
@@ -124,6 +126,8 @@ To run the bot alongside the local Telegram Bot API server in Docker:
 | `LOCAL_BOT_API_URL` | Optional | Custom URL for local Bot API server (defaults to `http://telegram-bot-api:8081`). |
 | `INSTAGRAM_COOKIES` | Optional | Netscape formatted cookies content for Instagram authentication. |
 | `COOKIES_FILE` | Optional | Path to a Netscape cookie file (e.g. `data/cookies.txt`). |
+| `MAX_CONCURRENT_DOWNLOADS` | Optional | Maximum simultaneous `yt-dlp` downloads (defaults to `2`). |
+| `MAX_CONCURRENT_TRANSCODES` | Optional | Maximum simultaneous `ffmpeg` transcoding tasks (defaults to `1`). |
 
 ---
 
