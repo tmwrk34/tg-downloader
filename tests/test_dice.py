@@ -193,3 +193,90 @@ async def test_dice_filter():
     assert await d_filter(create_message("hello world")) is False
     assert await d_filter(create_message("https://youtube.com/watch?v=123")) is False
     assert await d_filter(create_message(None)) is False
+
+
+def test_cyrillic_transliteration():
+    # 2д20 and 2к20
+    with patch("services.dice._rng.randint", side_effect=[12, 18]):
+        res = DiceParser.parse_and_roll("2д20")
+        assert res.total == 30
+        assert res.normalized_expression == "2d20"
+
+    with patch("services.dice._rng.randint", side_effect=[10, 15]):
+        res = DiceParser.parse_and_roll("2к20")
+        assert res.total == 25
+        assert res.normalized_expression == "2d20"
+
+    # д20 and к20
+    with patch("services.dice._rng.randint", return_value=17):
+        res = DiceParser.parse_and_roll("д20")
+        assert res.total == 17
+        assert res.normalized_expression == "1d20"
+
+    with patch("services.dice._rng.randint", return_value=8):
+        res = DiceParser.parse_and_roll("к20")
+        assert res.total == 8
+        assert res.normalized_expression == "1d20"
+
+    # 4к6к3 and 4к6к3+2
+    with patch("services.dice._rng.randint", side_effect=[1, 6, 4, 3]):
+        res = DiceParser.parse_and_roll("4к6к3")
+        assert res.total == 13
+        assert res.normalized_expression == "4d6kh3"
+
+    with patch("services.dice._rng.randint", side_effect=[2, 5, 4, 6]):
+        res = DiceParser.parse_and_roll("4к6к3+2")
+        assert res.total == 17
+        assert res.normalized_expression == "4d6kh3+2"
+
+    # Letter modifiers in Cyrillic: 2д6п3 (+3), 2к6м2 (-2)
+    with patch("services.dice._rng.randint", side_effect=[3, 4]):
+        res = DiceParser.parse_and_roll("2д6п3")
+        assert res.total == 10
+        assert res.normalized_expression == "2d6+3"
+
+    with patch("services.dice._rng.randint", side_effect=[5, 3]):
+        res = DiceParser.parse_and_roll("2к6м2")
+        assert res.total == 6
+        assert res.normalized_expression == "2d6-2"
+
+    # Cyrillic prefixes and natural language
+    norm, secret = DiceParser.normalize_input("кинь 2д20")
+    assert norm == "2д20"
+    assert secret is False
+
+    norm, secret = DiceParser.normalize_input("ролл 2к20")
+    assert norm == "2к20"
+    assert secret is False
+
+    norm, secret = DiceParser.normalize_input("дм ролл 2д20")
+    assert norm == "2д20"
+    assert secret is True
+
+    norm, secret = DiceParser.normalize_input("дмролл 2к20")
+    assert norm == "2к20"
+    assert secret is True
+
+
+@pytest.mark.asyncio
+async def test_dice_filter_cyrillic():
+    d_filter = DiceFilter()
+
+    res = await d_filter(create_message("2д20"))
+    assert res == {"dice_expr": "2д20", "is_secret": False}
+
+    res = await d_filter(create_message("2к20"))
+    assert res == {"dice_expr": "2к20", "is_secret": False}
+
+    res = await d_filter(create_message("д20"))
+    assert res == {"dice_expr": "д20", "is_secret": False}
+
+    res = await d_filter(create_message("к20"))
+    assert res == {"dice_expr": "к20", "is_secret": False}
+
+    res = await d_filter(create_message("дм ролл 2д20"))
+    assert res == {"dice_expr": "2д20", "is_secret": True}
+
+    # Slash commands with Cyrillic aliases should be skipped by DiceFilter
+    assert await d_filter(create_message("/ролл 2д20")) is False
+    assert await d_filter(create_message("/дмролл 2к20")) is False

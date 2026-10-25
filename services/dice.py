@@ -154,25 +154,47 @@ def get_secret_roll(secret_id: str) -> tuple[int, str, str, str] | None:
 class DiceParser:
     """Parser and evaluator for tabletop dice expressions."""
 
-    # Matches dice expressions like 2d6, 4d6k3, 2d20kh1, 4d6dl2, d20, etc.
+    # Matches dice expressions like 2d6, 2д20, 2к20, 4d6k3, 4к6к3, 2d20kh1, d20, д20, к20
     DICE_PATTERN = re.compile(
-        r"^(\d+)?d(\d+)(?:(kh|kl|k|dh|dl|d)(\d+))?$",
+        r"^(\d+)?([dдк])(\d+)(?:([a-zа-яёіїє]+)(\d+))?$",
         re.IGNORECASE,
     )
+
+    MODIFIER_MAP: dict[str, str] = {
+        # Keep highest
+        "k": "kh",
+        "kh": "kh",
+        "к": "kh",
+        "кв": "kh",
+        # Keep lowest
+        "kl": "kl",
+        "кн": "kl",
+        # Drop lowest
+        "d": "dl",
+        "dl": "dl",
+        "с": "dl",
+        "сн": "dl",
+        "д": "dl",
+        "дн": "dl",
+        # Drop highest
+        "dh": "dh",
+        "св": "dh",
+        "дв": "dh",
+    }
 
     @staticmethod
     def normalize_input(raw: str) -> tuple[str, bool]:
         """
-        Normalize natural language text into a clean dice expression.
+        Normalize natural language and transliterated text into a clean dice expression.
         Returns: (normalized_expression, is_secret)
         """
         text = raw.strip()
 
-        # Check for secret roll prefixes
+        # Check for secret roll prefixes (English & Cyrillic)
         is_secret = False
         secret_prefixes = [
-            r"^(?:/dmroll|dmroll)\b",
-            r"^(?:dm\s+roll|hidden\s+roll|secret\s+roll)\b",
+            r"^(?:/dmroll|dmroll|/дмролл|дмролл|/дм|дм)\b",
+            r"^(?:dm\s*roll|hidden\s*roll|secret\s*roll|дм\s*ролл|секретний\s*ролл|секретный\s*ролл)\b",
         ]
         for pattern in secret_prefixes:
             m = re.match(pattern, text, flags=re.I)
@@ -181,19 +203,27 @@ class DiceParser:
                 text = text[m.end() :].strip()
                 break
 
-        # Standard command prefix /roll
-        text = re.sub(r"^/roll\b", "", text, flags=re.I).strip()
+        # Standard command prefix /roll and Cyrillic aliases
+        text = re.sub(r"^(?:/roll|/ролл|/кинь|/кидок)\b", "", text, flags=re.I).strip()
 
         # Natural language action verbs (English & Ukrainian/Russian)
-        text = re.sub(r"^(?:roll|throw|кинь|ролл)\s+", "", text, flags=re.I).strip()
+        text = re.sub(
+            r"^(?:roll|throw|кинь|ролл|кидок|брось|бросить)\s+", "", text, flags=re.I
+        ).strip()
 
-        # Natural language descriptive dice: "20 sided dice" -> "1d20"
-        text = re.sub(r"(\d+)\s*sided\s*dice", r"1d\1", text, flags=re.I)
+        # Natural language descriptive dice: "20 sided dice", "20 гранний кубик"
+        text = re.sub(
+            r"(\d+)\s*(?:sided\s*dice|гранний\s*кубик|гранный\s*кубик|граней)",
+            r"1d\1",
+            text,
+            flags=re.I,
+        )
 
-        # Text-based modifiers: 2d6p3 -> 2d6+3, 2d6m3 -> 2d6-3
-        # Match 'p' or 'm' preceded by digit or modifier and followed by digit
-        text = re.sub(r"([0-9a-z])p([0-9]+)", r"\1+\2", text, flags=re.I)
-        text = re.sub(r"([0-9a-z])m([0-9]+)", r"\1-\2", text, flags=re.I)
+        # Text-based modifiers:
+        # 2d6p3 / 2д6п3 -> 2d6+3
+        # 2d6m3 / 2д6м3 -> 2d6-3
+        text = re.sub(r"([0-9a-zа-яёіїє])(?:p|п)([0-9]+)", r"\1+\2", text, flags=re.I)
+        text = re.sub(r"([0-9a-zа-яёіїє])(?:m|м)([0-9]+)", r"\1-\2", text, flags=re.I)
 
         # Remove extraneous whitespace around + and -
         text = re.sub(r"\s*([+-])\s*", r"\1", text)
@@ -207,8 +237,8 @@ class DiceParser:
         if not cleaned:
             return False
 
-        # Must contain at least one 'd' character followed by digits
-        if not re.search(r"\bd?\d*d\d+", cleaned, re.I):
+        # Must contain at least one dice term like 2d20, 2д20, 2к20, d20, д20, к20
+        if not re.search(r"(?:^|[^\w])\d*[dдк]\d+", cleaned, re.I):
             return False
 
         try:
@@ -248,12 +278,12 @@ class DiceParser:
                 constant_modifier += sign * int(token)
                 continue
 
-            # Otherwise, must be a dice term: e.g. 4d6k3, d20, 2d20kh1
+            # Otherwise, must be a dice term: e.g. 4d6k3, 2д20, 2к20, 4к6к3
             dice_match = cls.DICE_PATTERN.match(token)
             if not dice_match:
                 raise ValueError(f"Invalid dice term: '{token}'")
 
-            raw_count, raw_sides, mod_type, raw_mod_count = dice_match.groups()
+            raw_count, _sep, raw_sides, raw_mod_type, raw_mod_count = dice_match.groups()
 
             count = int(raw_count) if raw_count else 1
             sides = int(raw_sides)
@@ -263,13 +293,13 @@ class DiceParser:
             if sides <= 0 or sides > MAX_DICE_SIDES:
                 raise ValueError(f"Dice sides must be between 1 and {MAX_DICE_SIDES}.")
 
-            mod_type_clean = mod_type.lower() if mod_type else None
-            mod_count = int(raw_mod_count) if raw_mod_count else None
-
-            if mod_type_clean:
-                # Default modifier count is 1 if unspecified (e.g. 4d6k -> 4d6k1)
-                if mod_count is None:
-                    mod_count = 1
+            norm_mod_type = None
+            mod_count = None
+            if raw_mod_type:
+                norm_mod_type = cls.MODIFIER_MAP.get(raw_mod_type.lower())
+                if not norm_mod_type:
+                    raise ValueError(f"Invalid keep/drop modifier: '{raw_mod_type}'")
+                mod_count = int(raw_mod_count) if raw_mod_count else 1
                 if mod_count <= 0 or mod_count > count:
                     raise ValueError(
                         f"Keep/drop count ({mod_count}) must be between 1 and total dice ({count})."
@@ -280,29 +310,28 @@ class DiceParser:
             single_rolls = [SingleDiceRoll(value=v, is_kept=True) for v in raw_rolls]
 
             # Apply keep / drop logic
-            if mod_type_clean and mod_count is not None:
-                # Pair with original index for stable marking
+            if norm_mod_type and mod_count is not None:
                 indexed_rolls = list(enumerate(raw_rolls))
 
-                if mod_type_clean in {"kh", "k"}:
+                if norm_mod_type == "kh":
                     # Keep N highest
                     indexed_rolls.sort(key=lambda x: x[1], reverse=True)
                     kept_indices = {idx for idx, _ in indexed_rolls[:mod_count]}
                     for i, r in enumerate(single_rolls):
                         r.is_kept = i in kept_indices
-                elif mod_type_clean == "kl":
+                elif norm_mod_type == "kl":
                     # Keep N lowest
                     indexed_rolls.sort(key=lambda x: x[1])
                     kept_indices = {idx for idx, _ in indexed_rolls[:mod_count]}
                     for i, r in enumerate(single_rolls):
                         r.is_kept = i in kept_indices
-                elif mod_type_clean in {"dl", "d"}:
+                elif norm_mod_type == "dl":
                     # Drop N lowest
                     indexed_rolls.sort(key=lambda x: x[1])
                     dropped_indices = {idx for idx, _ in indexed_rolls[:mod_count]}
                     for i, r in enumerate(single_rolls):
                         r.is_kept = i not in dropped_indices
-                elif mod_type_clean == "dh":
+                elif norm_mod_type == "dh":
                     # Drop N highest
                     indexed_rolls.sort(key=lambda x: x[1], reverse=True)
                     dropped_indices = {idx for idx, _ in indexed_rolls[:mod_count]}
@@ -314,7 +343,7 @@ class DiceParser:
                 sides=sides,
                 rolls=single_rolls,
                 sign=sign,
-                modifier_type=mod_type_clean,
+                modifier_type=norm_mod_type,
                 modifier_count=mod_count,
             )
             dice_terms.append(term_result)
@@ -323,6 +352,27 @@ class DiceParser:
             raise ValueError("No valid dice or modifiers provided.")
 
         total = sum(t.total for t in dice_terms) + constant_modifier
+
+        # Canonical standardized expression (e.g. 2d20, 4d6kh3+2)
+        canonical_parts = []
+        for idx, t in enumerate(dice_terms):
+            prefix = ""
+            if idx > 0:
+                prefix = "+" if t.sign > 0 else "-"
+            elif t.sign < 0:
+                prefix = "-"
+            mod_str = (
+                f"{t.modifier_type}{t.modifier_count}"
+                if t.modifier_type and t.modifier_count
+                else ""
+            )
+            canonical_parts.append(f"{prefix}{t.count}d{t.sides}{mod_str}")
+
+        if constant_modifier != 0:
+            mod_prefix = "+" if constant_modifier > 0 else "-"
+            canonical_parts.append(f"{mod_prefix}{abs(constant_modifier)}")
+
+        canonical_expr = "".join(canonical_parts) if canonical_parts else clean_expr
 
         # Check for Natural 20 / Natural 1 on d20 rolls
         is_crit_hit = False
@@ -339,7 +389,7 @@ class DiceParser:
 
         return DiceRollResult(
             expression=expr,
-            normalized_expression=clean_expr,
+            normalized_expression=canonical_expr,
             dice_terms=dice_terms,
             constant_modifier=constant_modifier,
             total=total,

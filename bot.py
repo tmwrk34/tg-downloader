@@ -111,7 +111,7 @@ async def ping_handler(message: Message, matched_phrase: str = ""):
     await message.reply("Pong! 🏓 Alive, well, and comfortably running inside a Raspberry Pi.")
 
 
-@dp.message(Command("roll"))
+@dp.message(Command("roll", "ролл", "кинь", "кидок"))
 async def roll_command_handler(message: Message, command: CommandObject):
     expr = command.args.strip() if command.args else "d20"
     user_name = message.from_user.first_name if message.from_user else "Player"
@@ -122,7 +122,7 @@ async def roll_command_handler(message: Message, command: CommandObject):
         await message.reply(f"⚠️ <b>Invalid roll syntax:</b> {err}", parse_mode="HTML")
 
 
-@dp.message(Command("dmroll"))
+@dp.message(Command("dmroll", "дмролл", "дм", "секретролл"))
 async def dmroll_command_handler(message: Message, command: CommandObject):
     expr = command.args.strip() if command.args else "d20"
     user_name = message.from_user.first_name if message.from_user else "Player"
