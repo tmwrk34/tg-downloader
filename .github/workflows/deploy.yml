@@ -13,8 +13,26 @@ jobs:
       group: production-deploy
       cancel-in-progress: false
     steps:
+      - name: Preserve SQLite databases before checkout
+        run: |
+          mkdir -p /tmp/tg_bot_db_backup
+          if [ -d data ]; then
+            cp -n data/*.db /tmp/tg_bot_db_backup/ 2>/dev/null || true
+            echo "Backed up existing SQLite databases from data/ to /tmp/tg_bot_db_backup/"
+          fi
+
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Restore SQLite databases after checkout
+        run: |
+          mkdir -p data
+          if [ -d /tmp/tg_bot_db_backup ]; then
+            cp -n /tmp/tg_bot_db_backup/*.db data/ 2>/dev/null || true
+            echo "Restored SQLite databases to data/"
+          fi
 
       - name: Generate .env configuration
         env:
