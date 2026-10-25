@@ -615,3 +615,26 @@ def test_core_cookie_detection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     cookie_path = core._get_cookie_file()
     assert cookie_path is not None
     assert Path(cookie_path).read_text(encoding="utf-8") == "# IG Cookies Raw"
+
+
+@pytest.mark.asyncio
+async def test_float_duration_width_height_conversion(core_downloader: MediaDownloaderCore):
+    fake_info = {
+        "title": "Float Video",
+        "duration": 9.565999984741211,
+        "width": 1080.0,
+        "height": 1920.0,
+    }
+
+    with patch("downloader.core.yt_dlp.YoutubeDL") as mock_ydl_cls:
+        instance = MagicMock()
+        instance.extract_info.return_value = fake_info
+        mock_ydl_cls.return_value.__enter__.return_value = instance
+
+        meta = await core_downloader.extract_metadata("https://www.instagram.com/reel/12345/")
+        assert meta.duration == 10
+        assert isinstance(meta.duration, int)
+        assert meta.width == 1080
+        assert isinstance(meta.width, int)
+        assert meta.height == 1920
+        assert isinstance(meta.height, int)
