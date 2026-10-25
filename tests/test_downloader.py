@@ -312,6 +312,15 @@ def test_youtube_extract_video_id():
     assert YouTubeService.extract_video_id("https://example.com/not-youtube") is None
 
 
+def test_youtube_is_short():
+    assert YouTubeService.is_short("https://www.youtube.com/shorts/dQw4w9WgXcQ") is True
+    assert YouTubeService.is_short("https://youtube.com/shorts/dQw4w9WgXcQ?feature=share") is True
+    assert YouTubeService.is_short("https://m.youtube.com/shorts/dQw4w9WgXcQ") is True
+    assert YouTubeService.is_short("https://www.youtube.com/watch?v=dQw4w9WgXcQ") is False
+    assert YouTubeService.is_short("https://youtu.be/dQw4w9WgXcQ") is False
+    assert YouTubeService.is_short("https://music.youtube.com/watch?v=dQw4w9WgXcQ") is False
+
+
 @pytest.mark.asyncio
 async def test_downloaded_media_gallery_cleanup(tmp_path: Path):
     job_dir = tmp_path / "job_gallery"
