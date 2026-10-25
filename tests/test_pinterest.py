@@ -1,10 +1,9 @@
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from downloader.core import MediaDownloaderCore
-from downloader.models import DownloadedMedia
 from downloader.platforms.pinterest import (
     PinterestService,
     _shortlink_cache,
@@ -74,7 +73,6 @@ def test_resolve_pinterest_url_and_lru_caching():
 
         assert res1 == "https://www.pinterest.com/pin/888777666/"
         assert res2 == "https://www.pinterest.com/pin/888777666/"
-        # Should only call network once due to LRU cache
         assert mock_open.call_count == 1
 
     # Network error fallback
@@ -85,13 +83,13 @@ def test_resolve_pinterest_url_and_lru_caching():
 
 def test_pinterest_url_normalization():
     norm1 = normalize_media_url("https://www.pinterest.com/pin/1234567890/?invite_code=abc")
-    assert norm1 == "pinterest:pin:1234567890"
+    assert norm1 == "pinterest:v2:pin:1234567890"
 
     norm2 = normalize_media_url("https://www.pinterest.com/pin/cool-title--987654321/")
-    assert norm2 == "pinterest:pin:987654321"
+    assert norm2 == "pinterest:v2:pin:987654321"
 
     norm_short = normalize_media_url("https://pin.it/xyz123")
-    assert norm_short == "pinterest:shortlink:xyz123"
+    assert norm_short == "pinterest:v2:shortlink:xyz123"
 
 
 @pytest.mark.asyncio
@@ -101,7 +99,7 @@ async def test_pinterest_canonical_cache_key():
         return_value="https://www.pinterest.com/pin/1234567890/",
     ):
         key = await get_canonical_cache_key("https://pin.it/xyz123", platform="pinterest")
-        assert key == "pinterest:pin:1234567890"
+        assert key == "pinterest:v2:pin:1234567890"
 
 
 def test_platform_registry_supports_pinterest(tmp_path: Path):
@@ -122,48 +120,22 @@ def test_platform_registry_supports_pinterest(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_pinterest_download_ytdl_path(tmp_path: Path):
+async def test_pinterest_download_carousel_slots_10_photos(tmp_path: Path):
     core = MediaDownloaderCore(download_dir=tmp_path)
     service = PinterestService(core)
 
-    fake_downloaded = DownloadedMedia(
-        filepath=tmp_path / "pin_video.mp4",
-        title="Pinterest Video Pin",
-        filesize=1024,
-    )
-
-    with (
-        patch(
-            "downloader.platforms.pinterest.resolve_pinterest_url",
-            return_value="https://www.pinterest.com/pin/111/",
-        ),
-        patch(
-            "downloader.platforms.base.BasePlatformService.download", new_callable=AsyncMock
-        ) as mock_super,
-    ):
-        mock_super.return_value = fake_downloaded
-        res = await service.download("https://pin.it/shortVideo")
-        assert res.title == "Pinterest Video Pin"
-        assert res.filepath == tmp_path / "pin_video.mp4"
-
-
-@pytest.mark.asyncio
-async def test_pinterest_download_direct_api_photo_fallback(tmp_path: Path):
-    core = MediaDownloaderCore(download_dir=tmp_path)
-    service = PinterestService(core)
-
-    pin_id = "555666777"
+    pin_id = "1055531231435344334"
+    # Construct 10 carousel slots matching Pinterest Relay format
+    slots = [
+        {
+            "images_1200x": {"url": f"https://i.pinimg.com/1200x/img_{i}.jpg"},
+        }
+        for i in range(10)
+    ]
     raw_api_data = {
-        "title": "Aesthetic Room Photo",
-        "grid_title": "Aesthetic Room",
-        "closeup_attribution": {"full_name": "Aesthetic Creator"},
-        "images": {
-            "orig": {
-                "url": "https://i.pinimg.com/originals/fake_orig.jpg",
-                "width": 1080,
-                "height": 1920,
-            }
-        },
+        "title": "10 Photo Collage",
+        "closeup_attribution": {"full_name": "Collage Creator"},
+        "carouselData": {"carouselSlots": slots},
     }
 
     with (
@@ -171,85 +143,89 @@ async def test_pinterest_download_direct_api_photo_fallback(tmp_path: Path):
             "downloader.platforms.pinterest.resolve_pinterest_url",
             return_value=f"https://www.pinterest.com/pin/{pin_id}/",
         ),
+        patch.object(service, "_fetch_pin_data_sync", return_value=raw_api_data),
+        patch("downloader.platforms.pinterest.download_url_to_file") as mock_dl_file,
+    ):
+
+        def fake_dl(url, path):
+            Path(path).write_bytes(b"image_bytes")
+
+        mock_dl_file.side_effect = fake_dl
+
+        res = await service.download("https://pin.it/1BHRnKwgY")
+        assert res.title == "10 Photo Collage"
+        assert res.artist == "Collage Creator"
+        assert res.is_gallery is True
+        assert len(res.gallery_items) == 10
+        assert all(item[0] == "photo" for item in res.gallery_items)
+        assert mock_dl_file.call_count == 10
+
+
+@pytest.mark.asyncio
+async def test_pinterest_download_single_photo(tmp_path: Path):
+    core = MediaDownloaderCore(download_dir=tmp_path)
+    service = PinterestService(core)
+
+    pin_id = "1105352302312686389"
+    raw_api_data = {
+        "title": "Single Aesthetic Photo",
+        "closeup_attribution": {"full_name": "Aesthetic Creator"},
+        "images_orig": {"url": "https://i.pinimg.com/originals/photo1.jpg"},
+    }
+
+    with (
         patch(
-            "downloader.platforms.base.BasePlatformService.download",
-            side_effect=Exception("yt-dlp no video formats"),
+            "downloader.platforms.pinterest.resolve_pinterest_url",
+            return_value=f"https://www.pinterest.com/pin/{pin_id}/",
         ),
         patch.object(service, "_fetch_pin_data_sync", return_value=raw_api_data),
         patch("downloader.platforms.pinterest.download_url_to_file") as mock_dl_file,
     ):
 
         def fake_dl(url, path):
-            Path(path).write_bytes(b"fake_image_bytes")
+            Path(path).write_bytes(b"photo_bytes")
 
         mock_dl_file.side_effect = fake_dl
 
-        res = await service.download("https://pin.it/photoPin")
-        assert res.title == "Aesthetic Room Photo"
-        assert res.artist == "Aesthetic Creator"
+        res = await service.download("https://pin.it/ccPRWi6Xl")
+        assert res.title == "Single Aesthetic Photo"
         assert res.is_gallery is False
-        assert res.filepath.suffix == ".jpg"
+        assert res.filepath.name == f"{pin_id}.jpg"
         assert res.filepath.exists()
 
 
-@pytest.mark.asyncio
-async def test_pinterest_download_direct_api_idea_pin_carousel(tmp_path: Path):
+def test_pinterest_fetch_pin_data_from_relay_html(tmp_path: Path):
     core = MediaDownloaderCore(download_dir=tmp_path)
     service = PinterestService(core)
 
-    pin_id = "999888777"
-    raw_api_data = {
-        "title": "Outfit Ideas Collection",
-        "closeup_attribution": {"full_name": "Fashion Blogger"},
-        "story_pin_data": {
-            "pages": [
-                {
-                    "image": {
-                        "images": {
-                            "originals": {
-                                "url": "https://i.pinimg.com/originals/slide1.jpg",
-                                "width": 800,
-                                "height": 1200,
-                            }
-                        }
-                    }
-                },
-                {
-                    "image": {
-                        "images": {
-                            "originals": {
-                                "url": "https://i.pinimg.com/originals/slide2.jpg",
-                                "width": 800,
-                                "height": 1200,
-                            }
-                        }
-                    }
-                },
-            ]
-        },
-    }
+    mock_html = """
+    <html>
+      <head></head>
+      <body>
+        <script>
+          window.__PWS_RELAY_REGISTER_COMPLETED_REQUEST__(
+            "%7Bquery%7D",
+            {
+              "data": {
+                "v3GetPinQueryv2": {
+                  "data": {
+                    "title": "Relay Extracted Pin",
+                    "images_orig": {"url": "https://i.pinimg.com/originals/test.jpg"}
+                  }
+                }
+              }
+            }
+          );
+        </script>
+      </body>
+    </html>
+    """
 
-    with (
-        patch(
-            "downloader.platforms.pinterest.resolve_pinterest_url",
-            return_value=f"https://www.pinterest.com/pin/{pin_id}/",
-        ),
-        patch(
-            "downloader.platforms.base.BasePlatformService.download",
-            side_effect=Exception("yt-dlp failed"),
-        ),
-        patch.object(service, "_fetch_pin_data_sync", return_value=raw_api_data),
-        patch("downloader.platforms.pinterest.download_url_to_file") as mock_dl_file,
-    ):
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = mock_html.encode("utf-8")
+    mock_resp.__enter__.return_value = mock_resp
 
-        def fake_dl(url, path):
-            Path(path).write_bytes(b"slide_bytes")
-
-        mock_dl_file.side_effect = fake_dl
-
-        res = await service.download(f"https://www.pinterest.com/pin/{pin_id}/")
-        assert res.title == "Outfit Ideas Collection"
-        assert res.is_gallery is True
-        assert len(res.gallery_items) == 2
-        assert res.gallery_items[0][0] == "photo"
-        assert res.gallery_items[1][0] == "photo"
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        data = service._fetch_pin_data_sync("12345")
+        assert data.get("title") == "Relay Extracted Pin"
+        assert data.get("images_orig", {}).get("url") == "https://i.pinimg.com/originals/test.jpg"

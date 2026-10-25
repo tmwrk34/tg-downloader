@@ -161,11 +161,11 @@ def normalize_media_url(
     # 4. Pinterest normalization
     pin_match = _PIN_NORM_RE.search(clean_url_str)
     if pin_match:
-        return f"pinterest:pin:{pin_match.group(1)}"
+        return f"pinterest:v2:pin:{pin_match.group(1)}"
 
     pin_short_match = _PIN_SHORTLINK_NORM_RE.search(clean_url_str)
     if pin_short_match:
-        return f"pinterest:shortlink:{pin_short_match.group(1)}"
+        return f"pinterest:v2:shortlink:{pin_short_match.group(1)}"
 
     # 5. Twitter / X normalization
     tw_match = _TW_NORM_RE.search(clean_url_str)
