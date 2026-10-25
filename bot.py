@@ -6,6 +6,7 @@ import uuid
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
+from aiogram.enums import ChatAction
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
@@ -43,14 +44,39 @@ from services.cache import (
     get_canonical_cache_key,
 )
 from services.dice import DiceParser, get_secret_roll, store_secret_roll
+from services.worker import (
+    MediaWorkerLimiter,
+    chat_action_heartbeat,
+    set_message_reaction,
+)
 
 # Payload and runtime safety thresholds
 MAX_VIDEO_DURATION_SECONDS = 3 * 3600  # 3 hours cap
 DOWNLOAD_TIMEOUT_SECONDS = 300  # 5 minutes download timeout
 METADATA_CACHE_TTL_SECONDS = 600  # 10 minutes cache for YouTube metadata
+MAX_METADATA_CACHE_SIZE = 100  # Upper bound on cached YouTube metadata entries
 
 # In-memory metadata cache: video_id -> (timestamp, MediaMetadata)
 _youtube_metadata_cache: dict[str, tuple[float, MediaMetadata]] = {}
+
+
+def _cache_youtube_metadata(video_id: str, meta: MediaMetadata) -> None:
+    """Store YouTube metadata with TTL pruning and strict upper-bound eviction."""
+    now = time.monotonic()
+    expired = [
+        k
+        for k, (ts, _) in _youtube_metadata_cache.items()
+        if (now - ts) >= METADATA_CACHE_TTL_SECONDS
+    ]
+    for k in expired:
+        _youtube_metadata_cache.pop(k, None)
+
+    while len(_youtube_metadata_cache) >= MAX_METADATA_CACHE_SIZE:
+        oldest_key = next(iter(_youtube_metadata_cache))
+        _youtube_metadata_cache.pop(oldest_key, None)
+
+    _youtube_metadata_cache[video_id] = (now, meta)
+
 
 # Configure logging
 logging.basicConfig(
@@ -70,6 +96,10 @@ dp = Dispatcher()
 downloader_core = MediaDownloaderCore(download_dir="./downloads")
 platform_registry = PlatformServiceRegistry(downloader_core)
 media_cache = MediaCache()
+worker_limiter = MediaWorkerLimiter(
+    max_concurrent_downloads=config.max_concurrent_downloads,
+    max_concurrent_transcodes=config.max_concurrent_transcodes,
+)
 
 # Register WhitelistMiddleware at the outer layer
 dp.message.outer_middleware(
@@ -682,8 +712,12 @@ async def media_url_handler(message: Message, url: str, platform: str):
         if video_id:
             status_msg = await message.reply("Fetching YouTube media information... ⏳")
             try:
-                meta = await service.extract_metadata(url)
-                _youtube_metadata_cache[video_id] = (time.monotonic(), meta)
+                cached_meta = _youtube_metadata_cache.get(video_id)
+                if cached_meta and (time.monotonic() - cached_meta[0]) < METADATA_CACHE_TTL_SECONDS:
+                    meta = cached_meta[1]
+                else:
+                    meta = await service.extract_metadata(url)
+                    _cache_youtube_metadata(video_id, meta)
                 dur_str = format_duration(meta.duration)
 
                 # Cap video duration at 3 hours
@@ -756,25 +790,70 @@ async def media_url_handler(message: Message, url: str, platform: str):
         if (platform == "youtube" and YouTubeService.is_short(url))
         else platform.capitalize()
     )
-    status_msg = await message.reply(f"Downloading {label} media... Please wait ⏳")
-    try:
-        downloaded = await asyncio.wait_for(
-            service.download(url),
-            timeout=DOWNLOAD_TIMEOUT_SECONDS,
+
+    async with worker_limiter.singleflight(cache_key):
+        # Re-check cache after singleflight lock in case a concurrent identical request just completed
+        if cache_key:
+            cached = await media_cache.get(cache_key)
+            if cached:
+                try:
+                    sent = await send_cached_media(message, cached)
+                    if sent:
+                        logger.info(
+                            "Cache HIT (after singleflight): Delivered %s (%s)", platform, cache_key
+                        )
+                        return
+                except TelegramAPIError:
+                    await media_cache.delete(cache_key)
+
+        initial_text = (
+            f"⏳ Queued {label} media for download... Please wait"
+            if worker_limiter.is_download_busy
+            else f"Downloading {label} media... Please wait ⏳"
         )
-        async with downloaded:
-            sent = await send_downloaded_media(status_msg, downloaded, cache_key=cache_key)
-            if sent:
-                await status_msg.delete()
-    except TimeoutError:
-        logger.warning("Download timed out for %s: %s", platform, url)
-        await status_msg.edit_text(
-            f"⏱ Download timed out for {platform.capitalize()} (exceeded 5 minutes).\n"
-            "The media stream might be too large or the server connection is slow."
-        )
-    except Exception as e:
-        logger.exception("Failed to process media URL %s", url)
-        await status_msg.edit_text(f"Failed to download media: {e}")
+        status_msg = await message.reply(initial_text)
+        was_queued = False
+
+        async def _on_queued(pos: int) -> None:
+            nonlocal was_queued
+            was_queued = True
+            await set_message_reaction(message, "⏳")
+            await status_msg.edit_text(
+                f"⏳ Queued {label} download (position #{pos})... Please wait"
+            )
+
+        async def _on_active() -> None:
+            await set_message_reaction(message, "⚡")
+            if was_queued:
+                await status_msg.edit_text(f"Downloading {label} media... Please wait ⏳")
+
+        try:
+            async with (
+                worker_limiter.acquire_download(on_queued=_on_queued, on_active=_on_active),
+                chat_action_heartbeat(message, ChatAction.UPLOAD_VIDEO),
+            ):
+                downloaded = await asyncio.wait_for(
+                    service.download(url),
+                    timeout=DOWNLOAD_TIMEOUT_SECONDS,
+                )
+                async with downloaded:
+                    sent = await send_downloaded_media(status_msg, downloaded, cache_key=cache_key)
+                    if sent:
+                        await status_msg.delete()
+                        await set_message_reaction(message, None)
+                    else:
+                        await set_message_reaction(message, "❌")
+        except TimeoutError:
+            logger.warning("Download timed out for %s: %s", platform, url)
+            await set_message_reaction(message, "❌")
+            await status_msg.edit_text(
+                f"⏱ Download timed out for {platform.capitalize()} (exceeded 5 minutes).\n"
+                "The media stream might be too large or the server connection is slow."
+            )
+        except Exception as e:
+            logger.exception("Failed to process media URL %s", url)
+            await set_message_reaction(message, "❌")
+            await status_msg.edit_text(f"Failed to download media: {e}")
 
 
 @dp.callback_query(F.data.startswith("yt:"))
@@ -822,12 +901,12 @@ async def youtube_callback_handler(callback: CallbackQuery):
 
     # Pre-flight payload size check using cached metadata if available
     try:
-        cached = _youtube_metadata_cache.get(video_id)
-        if cached and (time.monotonic() - cached[0]) < METADATA_CACHE_TTL_SECONDS:
-            meta = cached[1]
+        cached_meta = _youtube_metadata_cache.get(video_id)
+        if cached_meta and (time.monotonic() - cached_meta[0]) < METADATA_CACHE_TTL_SECONDS:
+            meta = cached_meta[1]
         else:
             meta = await service.extract_metadata(url)
-            _youtube_metadata_cache[video_id] = (time.monotonic(), meta)
+            _cache_youtube_metadata(video_id, meta)
 
         estimated_size = service.estimate_format_size(meta, quality)
         if estimated_size and estimated_size > config.max_payload_bytes:
@@ -850,36 +929,93 @@ async def youtube_callback_handler(callback: CallbackQuery):
         logger.warning("Could not pre-estimate size for %s: %s", url, e)
 
     await callback.answer()
-    if callback.message and isinstance(callback.message, Message):
-        await callback.message.edit_text(f"Downloading YouTube {label}... Please wait ⏳")
+    target_msg = callback.message if isinstance(callback.message, Message) else None
 
-    try:
-        format_opts = service.get_format_options(quality)
-        downloaded = await asyncio.wait_for(
-            service.download(url, extra_opts=format_opts),
-            timeout=DOWNLOAD_TIMEOUT_SECONDS,
-        )
-        async with downloaded:
-            if callback.message and isinstance(callback.message, Message):
-                sent = await send_downloaded_media(
-                    callback.message,
-                    downloaded,
-                    is_audio_only=(quality == "audio"),
-                    cache_key=cache_key,
-                )
+    async with worker_limiter.singleflight(cache_key):
+        # Check cache again after singleflight lock
+        cached = await media_cache.get(cache_key)
+        if cached and target_msg:
+            try:
+                sent = await send_cached_media(target_msg, cached)
                 if sent:
-                    await callback.message.delete()
-    except TimeoutError:
-        logger.warning("Download timed out for YouTube %s (%s)", quality, video_id)
-        if callback.message and isinstance(callback.message, Message):
-            await callback.message.edit_text(
-                f"⏱ Download timed out for {label} (exceeded 5 minutes).\n"
-                "The video stream may be too large or the server connection is slow."
-            )
-    except Exception as e:
-        logger.exception("Failed to download YouTube %s for %s", quality, video_id)
-        if callback.message and isinstance(callback.message, Message):
-            await callback.message.edit_text(f"Failed to download YouTube media: {e}")
+                    await target_msg.delete()
+                    logger.info(
+                        "Cache HIT (after singleflight): Delivered YouTube %s (%s)",
+                        quality,
+                        cache_key,
+                    )
+                    return
+            except TelegramAPIError:
+                await media_cache.delete(cache_key)
+
+        was_queued = False
+
+        async def _on_yt_queued(pos: int) -> None:
+            nonlocal was_queued
+            was_queued = True
+            if target_msg:
+                await set_message_reaction(target_msg, "⏳")
+                await target_msg.edit_text(
+                    f"⏳ Queued YouTube {label} (position #{pos})... Please wait"
+                )
+
+        async def _on_yt_active() -> None:
+            if target_msg:
+                await set_message_reaction(target_msg, "⚡")
+                await target_msg.edit_text(f"Downloading YouTube {label}... Please wait ⏳")
+
+        if target_msg and not worker_limiter.is_download_busy:
+            await target_msg.edit_text(f"Downloading YouTube {label}... Please wait ⏳")
+
+        chat_action = ChatAction.UPLOAD_VOICE if quality == "audio" else ChatAction.UPLOAD_VIDEO
+
+        try:
+            async with worker_limiter.acquire_download(
+                on_queued=_on_yt_queued, on_active=_on_yt_active
+            ):
+                format_opts = service.get_format_options(quality)
+                if target_msg:
+                    async with chat_action_heartbeat(target_msg, chat_action):
+                        if quality == "audio":
+                            async with worker_limiter.acquire_transcode():
+                                downloaded = await asyncio.wait_for(
+                                    service.download(url, extra_opts=format_opts),
+                                    timeout=DOWNLOAD_TIMEOUT_SECONDS,
+                                )
+                        else:
+                            downloaded = await asyncio.wait_for(
+                                service.download(url, extra_opts=format_opts),
+                                timeout=DOWNLOAD_TIMEOUT_SECONDS,
+                            )
+                else:
+                    downloaded = await asyncio.wait_for(
+                        service.download(url, extra_opts=format_opts),
+                        timeout=DOWNLOAD_TIMEOUT_SECONDS,
+                    )
+
+                async with downloaded:
+                    if target_msg:
+                        sent = await send_downloaded_media(
+                            target_msg,
+                            downloaded,
+                            is_audio_only=(quality == "audio"),
+                            cache_key=cache_key,
+                        )
+                        if sent:
+                            await target_msg.delete()
+        except TimeoutError:
+            logger.warning("Download timed out for YouTube %s (%s)", quality, video_id)
+            if target_msg:
+                await set_message_reaction(target_msg, "❌")
+                await target_msg.edit_text(
+                    f"⏱ Download timed out for {label} (exceeded 5 minutes).\n"
+                    "The video stream may be too large or the server connection is slow."
+                )
+        except Exception as e:
+            logger.exception("Failed to download YouTube %s for %s", quality, video_id)
+            if target_msg:
+                await set_message_reaction(target_msg, "❌")
+                await target_msg.edit_text(f"Failed to download YouTube media: {e}")
 
 
 async def main():

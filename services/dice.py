@@ -126,6 +126,7 @@ class DiceRollResult:
 
 
 # In-memory secret rolls store: secret_id -> (roller_user_id, roller_name, result_html, result_plain, created_at)
+MAX_SECRET_ROLLS_CACHE_SIZE = 500
 _secret_rolls_cache: dict[str, tuple[int, str, str, str, float]] = {}
 
 
@@ -137,6 +138,11 @@ def store_secret_roll(user_id: int, user_name: str, result_html: str, result_pla
     expired_keys = [k for k, (_, _, _, _, ts) in _secret_rolls_cache.items() if now - ts > 86400]
     for k in expired_keys:
         _secret_rolls_cache.pop(k, None)
+
+    # Enforce strict upper bound on cache size
+    while len(_secret_rolls_cache) >= MAX_SECRET_ROLLS_CACHE_SIZE:
+        oldest_key = next(iter(_secret_rolls_cache))
+        _secret_rolls_cache.pop(oldest_key, None)
 
     _secret_rolls_cache[secret_id] = (user_id, user_name, result_html, result_plain, now)
     return secret_id
@@ -159,6 +165,25 @@ class DiceParser:
         r"^(\d+)?([dдк])(\d+)(?:([a-zа-яёіїє]+)(\d+))?$",
         re.IGNORECASE,
     )
+    SECRET_PREFIX_PATTERNS = (
+        re.compile(r"^(?:/dmroll|dmroll|/дмролл|дмролл|/дм|дм)\b", re.IGNORECASE),
+        re.compile(
+            r"^(?:dm\s*roll|hidden\s*roll|secret\s*roll|дм\s*ролл|секретний\s*ролл|секретный\s*ролл)\b",
+            re.IGNORECASE,
+        ),
+    )
+    ROLL_CMD_PATTERN = re.compile(r"^(?:/roll|/ролл|/кинь|/кидок)\b", re.IGNORECASE)
+    ACTION_VERB_PATTERN = re.compile(
+        r"^(?:roll|throw|кинь|ролл|кидок|брось|бросить)\s+", re.IGNORECASE
+    )
+    SIDED_DICE_PATTERN = re.compile(
+        r"(\d+)\s*(?:sided\s*dice|гранний\s*кубик|гранный\s*кубик|граней)", re.IGNORECASE
+    )
+    PLUS_MOD_PATTERN = re.compile(r"([0-9a-zа-яёіїє])(?:p|п)([0-9]+)", re.IGNORECASE)
+    MINUS_MOD_PATTERN = re.compile(r"([0-9a-zа-яёіїє])(?:m|м)([0-9]+)", re.IGNORECASE)
+    WHITESPACE_OP_PATTERN = re.compile(r"\s*([+-])\s*")
+    HAS_DICE_TERM_PATTERN = re.compile(r"(?:^|[^\w])\d*[dдк]\d+", re.IGNORECASE)
+    TOKEN_SPLIT_PATTERN = re.compile(r"([+-]?)([^+-]+)")
 
     MODIFIER_MAP: dict[str, str] = {
         # Keep highest
@@ -182,8 +207,8 @@ class DiceParser:
         "дв": "dh",
     }
 
-    @staticmethod
-    def normalize_input(raw: str) -> tuple[str, bool]:
+    @classmethod
+    def normalize_input(cls, raw: str) -> tuple[str, bool]:
         """
         Normalize natural language and transliterated text into a clean dice expression.
         Returns: (normalized_expression, is_secret)
@@ -192,41 +217,30 @@ class DiceParser:
 
         # Check for secret roll prefixes (English & Cyrillic)
         is_secret = False
-        secret_prefixes = [
-            r"^(?:/dmroll|dmroll|/дмролл|дмролл|/дм|дм)\b",
-            r"^(?:dm\s*roll|hidden\s*roll|secret\s*roll|дм\s*ролл|секретний\s*ролл|секретный\s*ролл)\b",
-        ]
-        for pattern in secret_prefixes:
-            m = re.match(pattern, text, flags=re.I)
+        for pattern in cls.SECRET_PREFIX_PATTERNS:
+            m = pattern.match(text)
             if m:
                 is_secret = True
                 text = text[m.end() :].strip()
                 break
 
         # Standard command prefix /roll and Cyrillic aliases
-        text = re.sub(r"^(?:/roll|/ролл|/кинь|/кидок)\b", "", text, flags=re.I).strip()
+        text = cls.ROLL_CMD_PATTERN.sub("", text).strip()
 
         # Natural language action verbs (English & Ukrainian/Russian)
-        text = re.sub(
-            r"^(?:roll|throw|кинь|ролл|кидок|брось|бросить)\s+", "", text, flags=re.I
-        ).strip()
+        text = cls.ACTION_VERB_PATTERN.sub("", text).strip()
 
         # Natural language descriptive dice: "20 sided dice", "20 гранний кубик"
-        text = re.sub(
-            r"(\d+)\s*(?:sided\s*dice|гранний\s*кубик|гранный\s*кубик|граней)",
-            r"1d\1",
-            text,
-            flags=re.I,
-        )
+        text = cls.SIDED_DICE_PATTERN.sub(r"1d\1", text)
 
         # Text-based modifiers:
         # 2d6p3 / 2д6п3 -> 2d6+3
         # 2d6m3 / 2д6м3 -> 2d6-3
-        text = re.sub(r"([0-9a-zа-яёіїє])(?:p|п)([0-9]+)", r"\1+\2", text, flags=re.I)
-        text = re.sub(r"([0-9a-zа-яёіїє])(?:m|м)([0-9]+)", r"\1-\2", text, flags=re.I)
+        text = cls.PLUS_MOD_PATTERN.sub(r"\1+\2", text)
+        text = cls.MINUS_MOD_PATTERN.sub(r"\1-\2", text)
 
         # Remove extraneous whitespace around + and -
-        text = re.sub(r"\s*([+-])\s*", r"\1", text)
+        text = cls.WHITESPACE_OP_PATTERN.sub(r"\1", text)
 
         return text, is_secret
 
@@ -234,11 +248,7 @@ class DiceParser:
     def is_dice_expression(cls, raw: str) -> bool:
         """Check whether raw text can be interpreted as a dice roll."""
         cleaned, _ = cls.normalize_input(raw)
-        if not cleaned:
-            return False
-
-        # Must contain at least one dice term like 2d20, 2д20, 2к20, d20, д20, к20
-        if not re.search(r"(?:^|[^\w])\d*[dдк]\d+", cleaned, re.I):
+        if not cleaned or not cls.HAS_DICE_TERM_PATTERN.search(cleaned):
             return False
 
         try:
@@ -256,7 +266,7 @@ class DiceParser:
 
         # Split into signed tokens (+term or -term)
         # E.g. "4d6k3+2" -> ["4d6k3", "+2"], "2d6-1d4-3" -> ["2d6", "-1d4", "-3"]
-        token_matches = re.finditer(r"([+-]?)([^+-]+)", clean_expr)
+        token_matches = cls.TOKEN_SPLIT_PATTERN.finditer(clean_expr)
 
         dice_terms: list[DiceTermResult] = []
         constant_modifier = 0

@@ -32,6 +32,7 @@ MEDIA_PATTERNS: dict[Platform, re.Pattern[str]] = {
 
 # Trailing characters to strip from extracted URLs (punctuation attached at sentence end).
 TRAILING_PUNCTUATION = ".,!?:;)'\"]}>"
+_PLAYLIST_PARAM_RE = re.compile(r"&(?:list|index)=[^&\s]+")
 
 
 def clean_url(raw_url: str) -> str:
@@ -47,8 +48,7 @@ def clean_url(raw_url: str) -> str:
 
     # For single video/music links, strip playlist parameters to prevent slow playlist downloads
     if "/watch?" in url:
-        url = re.sub(r"&list=[^&\s]+", "", url)
-        url = re.sub(r"&index=[^&\s]+", "", url)
+        url = _PLAYLIST_PARAM_RE.sub("", url)
 
     return url
 

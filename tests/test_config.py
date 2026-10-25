@@ -1,6 +1,7 @@
 import os
 from unittest.mock import patch
 
+import pytest
 from aiogram.client.session.aiohttp import AiohttpSession
 
 from config import AppConfig, load_config
@@ -83,3 +84,41 @@ def test_local_bot_api_session_creation():
     session = AiohttpSession(api=server)
     assert session.api.base == "http://telegram-bot-api:8081/bot{token}/{method}"
     assert session.api.file == "http://telegram-bot-api:8081/file/bot{token}/{path}"
+
+
+def test_load_config_worker_concurrency_limits():
+    env_mock = {
+        "BOT_TOKEN": "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+        "ALLOWED_CHAT_IDS": "12345",
+        "MAX_CONCURRENT_DOWNLOADS": "4",
+        "MAX_CONCURRENT_TRANSCODES": "2",
+    }
+    with patch.dict(os.environ, env_mock, clear=True):
+        cfg = load_config()
+        assert cfg.max_concurrent_downloads == 4
+        assert cfg.max_concurrent_transcodes == 2
+
+
+def test_load_config_worker_concurrency_defaults_and_validation():
+    env_defaults = {
+        "BOT_TOKEN": "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+        "ALLOWED_CHAT_IDS": "12345",
+    }
+    with patch.dict(os.environ, env_defaults, clear=True):
+        cfg = load_config()
+        assert cfg.max_concurrent_downloads == 2
+        assert cfg.max_concurrent_transcodes == 1
+
+    env_zero = {
+        **env_defaults,
+        "MAX_CONCURRENT_DOWNLOADS": "0",
+    }
+    with patch.dict(os.environ, env_zero, clear=True), pytest.raises(ValueError):
+        load_config()
+
+    env_invalid = {
+        **env_defaults,
+        "MAX_CONCURRENT_TRANSCODES": "invalid",
+    }
+    with patch.dict(os.environ, env_invalid, clear=True), pytest.raises(ValueError):
+        load_config()

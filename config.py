@@ -13,6 +13,8 @@ class AppConfig:
     admin_user_ids: set[int]
     allowed_group_ids: set[int]
     local_bot_api_url: str | None = None
+    max_concurrent_downloads: int = 2
+    max_concurrent_transcodes: int = 1
 
     @property
     def max_payload_bytes(self) -> int:
@@ -23,6 +25,19 @@ class AppConfig:
         if self.local_bot_api_url:
             return 2000 * 1024 * 1024
         return 50 * 1024 * 1024
+
+
+def _parse_positive_int(env_key: str, default: int) -> int:
+    raw = os.getenv(env_key)
+    if not raw or not raw.strip():
+        return default
+    try:
+        val = int(raw.strip())
+    except ValueError as err:
+        raise ValueError(f"Invalid integer for {env_key}: '{raw}'") from err
+    if val < 1:
+        raise ValueError(f"{env_key} must be >= 1, got {val}")
+    return val
 
 
 def parse_chat_ids(raw_ids: str | None) -> tuple[set[int], set[int], set[int]]:
@@ -85,10 +100,15 @@ def load_config() -> AppConfig:
     else:
         local_api_url = None
 
+    max_concurrent_downloads = _parse_positive_int("MAX_CONCURRENT_DOWNLOADS", 2)
+    max_concurrent_transcodes = _parse_positive_int("MAX_CONCURRENT_TRANSCODES", 1)
+
     return AppConfig(
         bot_token=token.strip(),
         allowed_chat_ids=all_ids,
         admin_user_ids=admin_ids,
         allowed_group_ids=group_ids,
         local_bot_api_url=local_api_url,
+        max_concurrent_downloads=max_concurrent_downloads,
+        max_concurrent_transcodes=max_concurrent_transcodes,
     )

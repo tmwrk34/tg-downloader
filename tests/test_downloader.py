@@ -573,10 +573,10 @@ def test_resolve_tiktok_url():
         res = resolve_tiktok_url("https://vt.tiktok.com/ZSgxuBW5a/")
         assert res == "https://www.tiktok.com/@roller_055/photo/7700307198781492488"
 
-    # Exception should fall back to original URL
+    # Exception on an uncached shortlink should fall back to original URL
     with patch("urllib.request.urlopen", side_effect=Exception("network err")):
-        fallback = resolve_tiktok_url("https://vt.tiktok.com/ZSgxuBW5a/")
-        assert fallback == "https://vt.tiktok.com/ZSgxuBW5a/"
+        fallback = resolve_tiktok_url("https://vt.tiktok.com/ZSuncachedErr/")
+        assert fallback == "https://vt.tiktok.com/ZSuncachedErr/"
 
 
 @pytest.mark.asyncio
