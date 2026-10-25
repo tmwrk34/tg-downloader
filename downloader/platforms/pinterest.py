@@ -95,6 +95,53 @@ def _extract_slot_image_url(slot: dict[str, Any]) -> str | None:
     return None
 
 
+def _extract_video_candidate(data: Any) -> dict[str, Any] | None:
+    """Recursively search for highest-resolution direct MP4 video in Pinterest metadata."""
+    candidates: list[dict[str, Any]] = []
+
+    def recurse(node: Any) -> None:
+        if not isinstance(node, (dict, list)):
+            return
+        if isinstance(node, dict):
+            url = node.get("url")
+            if (
+                isinstance(url, str)
+                and ".mp4" in url
+                and "hls" not in url.lower()
+                and not url.endswith(".m3u8")
+            ):
+                candidates.append(node)
+            for v in node.values():
+                recurse(v)
+        elif isinstance(node, list):
+            for item in node:
+                recurse(item)
+
+    recurse(data)
+    if not candidates:
+        return None
+
+    return max(
+        candidates,
+        key=lambda v: (v.get("width") or 0) * (v.get("height") or 0),
+    )
+
+
+def _pin_richness_score(pin: dict[str, Any]) -> int:
+    """Score candidate pin payloads so the richest query result is preferred."""
+    score = 0
+    if (pin.get("carouselData") or {}).get("carouselSlots"):
+        score += 200
+    if pin.get("storyPinData"):
+        score += 100
+    if pin.get("videos"):
+        score += 100
+    if _extract_video_candidate(pin):
+        score += 300
+    score += len(pin)
+    return score
+
+
 class PinterestService(BasePlatformService):
     """Platform adapter for Pinterest images, videos, and multi-image idea pins."""
 
@@ -155,16 +202,20 @@ class PinterestService(BasePlatformService):
             html = resp.read().decode("utf-8")
 
         matches = _RELAY_PAYLOAD_RE.findall(html)
+        candidate_pins: list[dict[str, Any]] = []
         for json_payload in matches:
             try:
                 parsed = json.loads(json_payload)
                 data = parsed.get("data", {})
                 if "v3GetPinQueryv2" in data:
                     pin = data["v3GetPinQueryv2"].get("data")
-                    if pin:
-                        return pin
+                    if pin and isinstance(pin, dict):
+                        candidate_pins.append(pin)
             except Exception:
                 continue
+
+        if candidate_pins:
+            return max(candidate_pins, key=_pin_richness_score)
 
         # Secondary fallback: check __PWS_DATA__
         pws_match = re.search(r'<script[^>]*id="__PWS_DATA__"[^>]*>(.*?)</script>', html, re.DOTALL)
@@ -231,7 +282,7 @@ class PinterestService(BasePlatformService):
                         gallery_items=gallery_items,
                     )
 
-            # 2. Check for Story Pin / Idea Pin (multi-page)
+            # 2. Check for Multi-Page Story / Idea Pin (multiple pages)
             story_pin_data = pin_data.get("storyPinData") or {}
             pages = story_pin_data.get("pages") or []
 
@@ -240,34 +291,21 @@ class PinterestService(BasePlatformService):
                 total_filesize = 0
 
                 for idx, page in enumerate(pages):
-                    video_blocks = [b for b in page.get("blocks", []) if b.get("type") == "video"]
-                    video_list = (
-                        video_blocks[0].get("video", {}).get("video_list", {})
-                        if video_blocks
-                        else {}
-                    )
-
-                    best_video_url = None
-                    if video_list:
-                        mp4_candidates = [
-                            v["url"]
-                            for k, v in video_list.items()
-                            if isinstance(v, dict)
-                            and v.get("url")
-                            and "hls" not in k.lower()
-                            and not v["url"].endswith(".m3u8")
-                        ]
-                        if mp4_candidates:
-                            best_video_url = mp4_candidates[0]
-
-                    if best_video_url:
+                    video_cand = _extract_video_candidate(page)
+                    if video_cand and video_cand.get("url"):
                         vid_path = temp_dir / f"page_{idx:02d}.mp4"
-                        download_url_to_file(best_video_url, vid_path)
+                        download_url_to_file(video_cand["url"], vid_path)
                         gallery_items.append(("video", vid_path))
                         total_filesize += vid_path.stat().st_size
                     else:
                         img_dict = page.get("image", {}).get("images", {})
-                        img_url = _extract_slot_image_url(img_dict) or _extract_slot_image_url(page)
+                        img_url = (
+                            _extract_slot_image_url(img_dict)
+                            or _extract_slot_image_url(page)
+                            or (page.get("images_orig") or {}).get("url")
+                            or (page.get("images_1200x") or {}).get("url")
+                            or (page.get("images_736x") or {}).get("url")
+                        )
                         if img_url:
                             img_path = temp_dir / f"page_{idx:02d}.jpg"
                             download_url_to_file(img_url, img_path)
@@ -285,44 +323,49 @@ class PinterestService(BasePlatformService):
                         gallery_items=gallery_items,
                     )
 
-            # 3. Check for single Video Pin
-            videos = pin_data.get("videos")
-            if isinstance(videos, dict):
-                video_list = videos.get("video_list") or {}
-                mp4_candidates = [
-                    v
-                    for k, v in video_list.items()
-                    if isinstance(v, dict)
-                    and v.get("url")
-                    and "hls" not in k.lower()
-                    and not v["url"].endswith(".m3u8")
-                ]
-                if mp4_candidates:
-                    best_v = max(
-                        mp4_candidates,
-                        key=lambda v: (v.get("width") or 0) * (v.get("height") or 0),
-                    )
-                    vid_path = temp_dir / f"{pin_id}.mp4"
-                    download_url_to_file(best_v["url"], vid_path)
-                    return DownloadedMedia(
-                        filepath=vid_path,
-                        title=title,
-                        artist=uploader,
-                        duration=int(round(best_v.get("duration", 0) / 1000))
-                        if best_v.get("duration")
-                        else None,
-                        width=best_v.get("width"),
-                        height=best_v.get("height"),
-                        filesize=vid_path.stat().st_size,
-                        temp_dir=temp_dir,
-                    )
+            # 3. Check for single Video Pin (in storyPinData, pin_data['videos'], or anywhere in pin_data)
+            video_cand = None
+            if pages:
+                video_cand = _extract_video_candidate(pages[0])
+            if not video_cand:
+                video_cand = _extract_video_candidate(pin_data.get("videos") or {})
+            if not video_cand:
+                video_cand = _extract_video_candidate(pin_data)
+
+            if video_cand and video_cand.get("url"):
+                vid_path = temp_dir / f"{pin_id}.mp4"
+                download_url_to_file(video_cand["url"], vid_path)
+                dur = video_cand.get("duration")
+                duration = (
+                    int(round(dur / 1000)) if (dur and dur > 100) else (int(dur) if dur else None)
+                )
+                return DownloadedMedia(
+                    filepath=vid_path,
+                    title=title,
+                    artist=uploader,
+                    duration=duration,
+                    width=video_cand.get("width"),
+                    height=video_cand.get("height"),
+                    filesize=vid_path.stat().st_size,
+                    temp_dir=temp_dir,
+                )
 
             # 4. Check for single Photo Pin
-            orig_url = (
-                _extract_slot_image_url(pin_data)
-                or (pin_data.get("images_orig") or {}).get("url")
-                or (pin_data.get("images_736x") or {}).get("url")
-            )
+            orig_url = None
+            if pages:
+                orig_url = (
+                    _extract_slot_image_url(pages[0])
+                    or (pages[0].get("images_orig") or {}).get("url")
+                    or (pages[0].get("images_1200x") or {}).get("url")
+                    or (pages[0].get("images_736x") or {}).get("url")
+                )
+            if not orig_url:
+                orig_url = (
+                    _extract_slot_image_url(pin_data)
+                    or (pin_data.get("images_orig") or {}).get("url")
+                    or (pin_data.get("images_1200x") or {}).get("url")
+                    or (pin_data.get("images_736x") or {}).get("url")
+                )
 
             if orig_url:
                 orig_url = _promote_to_original_url(orig_url)
