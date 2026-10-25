@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 import uuid
+from typing import Any
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -42,6 +43,11 @@ from services.cache import (
     CachedMedia,
     MediaCache,
     get_canonical_cache_key,
+)
+from services.chatter import (
+    ChatterConfig,
+    ChatterService,
+    ChatterStats,
 )
 from services.dice import DiceParser, get_secret_roll, store_secret_roll
 from services.worker import (
@@ -96,10 +102,148 @@ dp = Dispatcher()
 downloader_core = MediaDownloaderCore(download_dir="./downloads")
 platform_registry = PlatformServiceRegistry(downloader_core)
 media_cache = MediaCache()
+chatter_service = ChatterService()
 worker_limiter = MediaWorkerLimiter(
     max_concurrent_downloads=config.max_concurrent_downloads,
     max_concurrent_transcodes=config.max_concurrent_transcodes,
 )
+
+# Cached bot identity for mention and reply resolution
+_bot_user = None
+
+
+async def _get_cached_bot_user(bot: Bot) -> Any:
+    global _bot_user
+    if _bot_user is None:
+        try:
+            _bot_user = await bot.get_me()
+        except Exception as e:
+            logger.debug("Could not fetch bot user: %s", e)
+    return _bot_user
+
+
+async def _is_user_chatter_admin(bot: Bot | None, chat_id: int, user_id: int) -> bool:
+    """Check if user has permissions to modify chatter configuration."""
+    if user_id in config.admin_user_ids:
+        return True
+    if chat_id > 0 and user_id == chat_id:
+        return True
+    if bot is None:
+        return True
+    try:
+        member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+        return member.status in {"creator", "administrator"}
+    except Exception as e:
+        logger.debug("Could not verify chat admin status for %d in %d: %s", user_id, chat_id, e)
+        return False
+
+
+REPLY_CHANCE_STEPS = [0.0, 0.02, 0.05, 0.10, 0.20, 0.35, 0.50]
+REACT_CHANCE_STEPS = [0.0, 0.05, 0.10, 0.20, 0.35, 0.50]
+COOLDOWN_STEPS = [10, 20, 30, 60, 120]
+
+
+def _next_step(current: float | int, steps: list[Any]) -> Any:
+    closest_idx = min(range(len(steps)), key=lambda i: abs(steps[i] - current))
+    return steps[(closest_idx + 1) % len(steps)]
+
+
+def format_chatter_card(
+    chat_title: str,
+    chat_id: int,
+    cfg: ChatterConfig,
+    stats: ChatterStats,
+) -> str:
+    status_str = "🟢 Enabled" if cfg.enabled else "🔴 Disabled"
+    learn_str = "🟢 Enabled" if cfg.learning_enabled else "🔴 Disabled"
+    mention_str = "🟢 Always (100%)" if cfg.reply_to_mention else "🔴 Disabled"
+
+    return (
+        f"🎭 <b>Tavern Chatter Settings</b>\n"
+        f"<b>Chat:</b> {chat_title} (<code>{chat_id}</code>)\n\n"
+        f"• <b>Status:</b> {status_str}\n"
+        f"• <b>Random Reply Chance:</b> {cfg.reply_chance * 100:.0f}%\n"
+        f"• <b>Reaction Chance:</b> {cfg.reaction_chance * 100:.0f}%\n"
+        f"• <b>Reply on Mention/Reply:</b> {mention_str}\n"
+        f"• <b>Cooldown:</b> {cfg.cooldown_seconds}s\n"
+        f"• <b>Learning:</b> {learn_str}\n"
+        f"• <b>Vocabulary:</b> {stats.total_transitions:,} transitions ({stats.unique_words:,} unique words)\n\n"
+        f"<i>Tap the buttons below to tweak settings or use commands:</i>\n"
+        f"<code>/chatter on|off</code>\n"
+        f"<code>/chatter chance 0-100</code>\n"
+        f"<code>/chatter react 0-100</code>\n"
+        f"<code>/chatter cooldown &lt;sec&gt;</code>\n"
+        f"<code>/chatter clear</code>"
+    )
+
+
+def build_chatter_keyboard(
+    chat_id: int,
+    cfg: ChatterConfig,
+    confirm_clear: bool = False,
+) -> InlineKeyboardMarkup:
+    if confirm_clear:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="⚠️ Confirm Clear All Words",
+                        callback_data=f"chatter:clear_confirm:{chat_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Cancel",
+                        callback_data=f"chatter:refresh:{chat_id}",
+                    ),
+                ]
+            ]
+        )
+
+    toggle_text = "🔴 Turn OFF" if cfg.enabled else "🟢 Turn ON"
+    reply_pct = int(cfg.reply_chance * 100)
+    react_pct = int(cfg.reaction_chance * 100)
+    learn_text = "🧠 Learn: ON" if cfg.learning_enabled else "🧠 Learn: OFF"
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"Status: {toggle_text}",
+                    callback_data=f"chatter:toggle:{chat_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"🎲 Reply: {reply_pct}%",
+                    callback_data=f"chatter:chance:{chat_id}",
+                ),
+                InlineKeyboardButton(
+                    text=f"🤡 React: {react_pct}%",
+                    callback_data=f"chatter:react:{chat_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"⏳ Cooldown: {cfg.cooldown_seconds}s",
+                    callback_data=f"chatter:cooldown:{chat_id}",
+                ),
+                InlineKeyboardButton(
+                    text=learn_text,
+                    callback_data=f"chatter:learn:{chat_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🧹 Clear Vocabulary",
+                    callback_data=f"chatter:clear_prompt:{chat_id}",
+                ),
+                InlineKeyboardButton(
+                    text="🔄 Refresh",
+                    callback_data=f"chatter:refresh:{chat_id}",
+                ),
+            ],
+        ]
+    )
+
 
 # Register WhitelistMiddleware at the outer layer
 dp.message.outer_middleware(
@@ -139,6 +283,7 @@ async def cmd_start(message: Message, is_admin: bool = False, is_private: bool =
         "🎲 <b>Dice Roller:</b> Use <code>/roll [expression]</code> (e.g. <code>2d6+3</code>, <code>4d6k3</code>) or type dice in chat!\n"
         "🔒 <b>Secret Rolls:</b> Use <code>/dmroll [expression]</code> for hidden rolls.\n"
         "✨ <b>Inline Mode:</b> Type <code>@bot</code> in any chat to roll dice.\n"
+        "🎭 <b>Tavern Chatter:</b> Type <code>/chatter</code> to configure the local bard chatterbot.\n"
         "📖 <b>Help:</b> Type <code>/help</code> for full documentation and options.",
         parse_mode="HTML",
     )
@@ -170,6 +315,14 @@ HELP_MANUAL_HTML = (
     "• <code>dm roll 2d20</code>, <code>hidden roll 4d6k3</code>, <code>дм ролл 2д20</code>\n\n"
     "✨ <b>Inline Mode:</b>\n"
     "Type <code>@bot</code> in any chat to choose preset dice or calculate custom rolls on the fly.\n\n"
+    "🎭 <b>Tavern Chatterbot (SLM / Markov):</b>\n"
+    "• <code>/chatter</code> (aliases: <code>/бард</code>, <code>/дурачок</code>, <code>/балабол</code>) — Interactive control card with inline buttons.\n"
+    "• <code>/chatter on|off</code> — Enable or disable the chatterbot in this chat.\n"
+    "• <code>/chatter chance &lt;0-100&gt;</code> — Set random message reply chance (%).\n"
+    "• <code>/chatter react &lt;0-100&gt;</code> — Set random emoji reaction chance (%).\n"
+    "• <code>/chatter cooldown &lt;sec&gt;</code> — Set anti-spam cooldown in seconds.\n"
+    "• <code>/chatter learn on|off</code> — Enable or disable vocabulary learning.\n"
+    "• <code>/chatter clear</code> — Wipe this chat's learned vocabulary.\n\n"
     "🏓 <b>Utilities:</b>\n"
     "• <code>/help</code> — Show this manual.\n"
     "• <code>ping</code> — Check bot connection and status."
@@ -310,6 +463,149 @@ async def secret_roll_callback_handler(callback_query: CallbackQuery):
         await callback_query.answer(
             f"🔒 Only {roller_name} can view this secret roll!", show_alert=True
         )
+
+
+@dp.message(Command("chatter", "бард", "дурачок", "балабол"))
+async def chatter_command_handler(message: Message, command: CommandObject):
+    user_id = message.from_user.id if message.from_user else 0
+    chat_id = message.chat.id
+    chat_title = message.chat.title or message.chat.first_name or "Private Chat"
+
+    if not await _is_user_chatter_admin(message.bot, chat_id, user_id):
+        await message.reply("⚠️ Only chat administrators can configure tavern chatter settings.")
+        return
+
+    args = (command.args or "").strip().split()
+    cfg = await chatter_service.get_config(chat_id)
+
+    if args:
+        subcmd = args[0].lower()
+        if subcmd in {"on", "start", "enable", "1"}:
+            cfg = await chatter_service.update_config(chat_id, enabled=True)
+        elif subcmd in {"off", "stop", "disable", "0"}:
+            cfg = await chatter_service.update_config(chat_id, enabled=False)
+        elif subcmd in {"chance", "reply"} and len(args) > 1:
+            try:
+                pct = float(args[1].rstrip("%"))
+                if not (0.0 <= pct <= 100.0):
+                    raise ValueError
+                cfg = await chatter_service.update_config(chat_id, reply_chance=pct / 100.0)
+            except ValueError:
+                await message.reply(
+                    "⚠️ Please provide a valid percentage between 0 and 100 (e.g. <code>/chatter chance 15</code>).",
+                    parse_mode="HTML",
+                )
+                return
+        elif subcmd in {"react", "reaction"} and len(args) > 1:
+            try:
+                pct = float(args[1].rstrip("%"))
+                if not (0.0 <= pct <= 100.0):
+                    raise ValueError
+                cfg = await chatter_service.update_config(chat_id, reaction_chance=pct / 100.0)
+            except ValueError:
+                await message.reply(
+                    "⚠️ Please provide a valid percentage between 0 and 100 (e.g. <code>/chatter react 10</code>).",
+                    parse_mode="HTML",
+                )
+                return
+        elif subcmd in {"cooldown", "cd"} and len(args) > 1:
+            try:
+                sec = int(args[1])
+                if not (0 <= sec <= 3600):
+                    raise ValueError
+                cfg = await chatter_service.update_config(chat_id, cooldown_seconds=sec)
+            except ValueError:
+                await message.reply(
+                    "⚠️ Please provide cooldown seconds between 0 and 3600 (e.g. <code>/chatter cooldown 30</code>).",
+                    parse_mode="HTML",
+                )
+                return
+        elif subcmd in {"learn", "learning"} and len(args) > 1:
+            val = args[1].lower() in {"on", "true", "1", "yes", "enable"}
+            cfg = await chatter_service.update_config(chat_id, learning_enabled=val)
+        elif subcmd in {"clear", "reset"}:
+            cleared = await chatter_service.clear_vocabulary(chat_id)
+            stats = await chatter_service.get_stats(chat_id)
+            text = format_chatter_card(chat_title, chat_id, cfg, stats)
+            keyboard = build_chatter_keyboard(chat_id, cfg)
+            await message.reply(
+                f"🧹 <b>Vocabulary cleared!</b> Removed {cleared:,} word transitions.\n\n" + text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+            return
+
+    stats = await chatter_service.get_stats(chat_id)
+    text = format_chatter_card(chat_title, chat_id, cfg, stats)
+    keyboard = build_chatter_keyboard(chat_id, cfg)
+    await message.reply(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("chatter:"))
+async def chatter_callback_handler(callback: CallbackQuery):
+    if not callback.data:
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        return
+
+    _, action, chat_id_str = parts[:3]
+    try:
+        target_chat_id = int(chat_id_str)
+    except ValueError:
+        return
+
+    user_id = callback.from_user.id if callback.from_user else 0
+    if not await _is_user_chatter_admin(callback.bot, target_chat_id, user_id):
+        await callback.answer(
+            "⚠️ Only chat administrators can modify chatter settings.",
+            show_alert=True,
+        )
+        return
+
+    cfg = await chatter_service.get_config(target_chat_id)
+    confirm_clear = False
+
+    if action == "toggle":
+        cfg = await chatter_service.update_config(target_chat_id, enabled=not cfg.enabled)
+        await callback.answer(f"Status changed to: {'Enabled' if cfg.enabled else 'Disabled'}")
+    elif action == "chance":
+        new_chance = _next_step(cfg.reply_chance, REPLY_CHANCE_STEPS)
+        cfg = await chatter_service.update_config(target_chat_id, reply_chance=new_chance)
+        await callback.answer(f"Reply chance set to {int(new_chance * 100)}%")
+    elif action == "react":
+        new_react = _next_step(cfg.reaction_chance, REACT_CHANCE_STEPS)
+        cfg = await chatter_service.update_config(target_chat_id, reaction_chance=new_react)
+        await callback.answer(f"Reaction chance set to {int(new_react * 100)}%")
+    elif action == "cooldown":
+        new_cd = _next_step(cfg.cooldown_seconds, COOLDOWN_STEPS)
+        cfg = await chatter_service.update_config(target_chat_id, cooldown_seconds=new_cd)
+        await callback.answer(f"Cooldown set to {new_cd}s")
+    elif action == "learn":
+        cfg = await chatter_service.update_config(
+            target_chat_id, learning_enabled=not cfg.learning_enabled
+        )
+        await callback.answer(f"Learning {'Enabled' if cfg.learning_enabled else 'Disabled'}")
+    elif action == "clear_prompt":
+        confirm_clear = True
+        await callback.answer()
+    elif action == "clear_confirm":
+        cleared = await chatter_service.clear_vocabulary(target_chat_id)
+        await callback.answer(f"Cleared {cleared:,} words!", show_alert=True)
+    elif action == "refresh":
+        await callback.answer("Refreshed!")
+
+    target_msg = callback.message if isinstance(callback.message, Message) else None
+    if target_msg:
+        chat_title = target_msg.chat.title or target_msg.chat.first_name or "Chat"
+        stats = await chatter_service.get_stats(target_chat_id)
+        text = format_chatter_card(chat_title, target_chat_id, cfg, stats)
+        keyboard = build_chatter_keyboard(target_chat_id, cfg, confirm_clear=confirm_clear)
+        try:
+            await target_msg.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        except Exception:
+            pass
 
 
 @dp.inline_query()
@@ -1016,6 +1312,58 @@ async def youtube_callback_handler(callback: CallbackQuery):
             if target_msg:
                 await set_message_reaction(target_msg, "❌")
                 await target_msg.edit_text(f"Failed to download YouTube media: {e}")
+
+
+@dp.message(F.text)
+async def chatter_message_listener(message: Message):
+    """
+    Chatterbot listener for group conversation:
+    passively learns vocabulary, occasionally sets emoji reactions,
+    and chimes in with Markov-generated sentences.
+    """
+    if not message.text or message.text.startswith("/"):
+        return
+
+    # 1. Passive vocabulary learning
+    await chatter_service.train(message.chat.id, message.text)
+
+    cfg = await chatter_service.get_config(message.chat.id)
+    if not cfg.enabled:
+        return
+
+    # 2. Random emoji reactions
+    if chatter_service.should_react(cfg):
+        reaction_emoji = chatter_service.pick_reaction()
+        await set_message_reaction(message, reaction_emoji)
+
+    # 3. Check direct mention or reply to the bot
+    bot_user = await _get_cached_bot_user(message.bot) if message.bot else None
+    bot_username = bot_user.username.lower() if bot_user and bot_user.username else ""
+    text_lower = message.text.lower()
+
+    is_mention = bool(
+        (bot_username and f"@{bot_username}" in text_lower)
+        or "бард" in text_lower
+        or "дурачок" in text_lower
+    )
+    is_reply_to_bot = bool(
+        message.reply_to_message
+        and message.reply_to_message.from_user
+        and bot_user
+        and message.reply_to_message.from_user.id == bot_user.id
+    )
+
+    if chatter_service.should_reply(cfg, is_mention_or_reply=(is_mention or is_reply_to_bot)):
+        reply_sentence = await chatter_service.generate(message.chat.id, seed_text=message.text)
+        if reply_sentence:
+            await chatter_service.record_reply(message.chat.id)
+            await message.reply(reply_sentence)
+        elif is_mention or is_reply_to_bot:
+            await message.reply(
+                "<i>*Blinks confusedly...*</i>\n"
+                "(My vocabulary in this tavern is still empty! Talk more so I can learn to speak.)",
+                parse_mode="HTML",
+            )
 
 
 async def main():
