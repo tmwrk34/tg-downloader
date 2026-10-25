@@ -15,6 +15,11 @@ class YouTubeService(BasePlatformService):
         match = re.search(r"(?:v=|youtu\.be/|shorts/|embed/|live/)([a-zA-Z0-9_-]{11})", url)
         return match.group(1) if match else None
 
+    @staticmethod
+    def is_short(url: str) -> bool:
+        """Check whether the given YouTube URL points directly to a Short."""
+        return "/shorts/" in url
+
     @property
     def platform_name(self) -> str:
         return "youtube"

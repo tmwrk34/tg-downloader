@@ -232,7 +232,12 @@ async def media_url_handler(message: Message, url: str, platform: str):
         return
 
     # For YouTube: prompt user with resolution and audio options via inline keyboard
-    if platform == "youtube" and isinstance(service, YouTubeService):
+    # (except for YouTube Shorts which are downloaded immediately like TikTok/Instagram)
+    if (
+        platform == "youtube"
+        and isinstance(service, YouTubeService)
+        and not YouTubeService.is_short(url)
+    ):
         video_id = YouTubeService.extract_video_id(url)
         if video_id:
             status_msg = await message.reply("Fetching YouTube media information... ⏳")
@@ -305,8 +310,13 @@ async def media_url_handler(message: Message, url: str, platform: str):
                 await status_msg.edit_text(f"Failed to fetch YouTube metadata: {e}")
                 return
 
-    # For TikTok, Instagram, and direct platforms: download immediately
-    status_msg = await message.reply(f"Downloading {platform.capitalize()} media... Please wait ⏳")
+    # For TikTok, Instagram, YouTube Shorts, and direct platforms: download immediately
+    label = (
+        "YouTube Short"
+        if (platform == "youtube" and YouTubeService.is_short(url))
+        else platform.capitalize()
+    )
+    status_msg = await message.reply(f"Downloading {label} media... Please wait ⏳")
     try:
         downloaded = await asyncio.wait_for(
             service.download(url),
