@@ -6,6 +6,12 @@ from services.cache import (
     get_canonical_cache_key,
     normalize_media_url,
 )
+from services.chatter import (
+    ChatterConfig,
+    ChatterService,
+    ChatterStats,
+    clean_and_tokenize,
+)
 from services.dice import DiceParser, get_secret_roll, store_secret_roll
 from services.worker import (
     MediaWorkerLimiter,
@@ -15,10 +21,14 @@ from services.worker import (
 
 __all__ = [
     "CachedMedia",
+    "ChatterConfig",
+    "ChatterService",
+    "ChatterStats",
     "DiceParser",
     "MediaCache",
     "MediaWorkerLimiter",
     "chat_action_heartbeat",
+    "clean_and_tokenize",
     "get_canonical_cache_key",
     "get_secret_roll",
     "normalize_media_url",

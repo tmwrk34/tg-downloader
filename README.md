@@ -56,6 +56,24 @@ A high-performance Telegram bot built with **aiogram 3** and **yt-dlp** for down
   - D&D Critical badges: `✨ CRITICAL HIT! (Natural 20) 🎯` and `💀 CRITICAL FAIL! (Natural 1) 💥`.
   - Strict English UI localization.
 
+### 🎭 Tavern Chatterbot (SLM / Markov Engine)
+- **Zero-CPU In-Memory / SQLite Markov Chain**: A lightweight chatterbot that passively learns from natural group conversation and generates amusing, context-inspired sentences without heavyweight LLMs or PyTorch dependencies (running comfortably on Raspberry Pi).
+- **Per-Chat Isolation & In-Chat Configuration**:
+  - Disabled by default. Enabled and configured **directly inside Telegram** via the `/chatter` command without modifying environment variables or restarting the bot.
+  - Interactive Inline Keyboard to toggle state, adjust reply frequency, emoji reaction chance, cooldown, and manage vocabulary.
+  - Commands:
+    - `/chatter` (aliases: `/бард`, `/дурачок`, `/балабол`) — Open interactive configuration card.
+    - `/chatter on` / `/chatter off` — Enable or disable chatterbot in the current chat.
+    - `/chatter chance <0-100>` — Set random message response chance (e.g. `5` for 5%).
+    - `/chatter react <0-100>` — Set random emoji reaction chance (e.g. `10` for 10%).
+    - `/chatter cooldown <seconds>` — Set anti-spam cooldown between spontaneous messages (defaults to `30s`).
+    - `/chatter learn on/off` — Toggle passive vocabulary training.
+    - `/chatter clear` — Wipe the current chat's learned vocabulary.
+- **Natural Triggers & Reactions**:
+  - Always replies (100%) when mentioned (`@bot`, "бард", "дурачок") or when a user replies to the bot's message.
+  - Uses candidate seed words from the user's message to anchor responses relevant to the ongoing conversation.
+  - Reacts with thematic tavern emojis (`🤡`, `🎲`, `🍺`, `🔥`, `🗿`, `⚡`, `🫡`, `🤔`, etc.).
+
 ### 🔒 Security & Access Control
 - **Whitelist Middleware**: Restricts all interactions strictly to chat IDs specified in `ALLOWED_CHAT_IDS`. Unauthorized messages are dropped silently.
 
