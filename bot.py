@@ -279,17 +279,15 @@ async def secret_roll_callback_handler(callback_query: CallbackQuery):
 async def inline_dice_handler(inline_query: InlineQuery):
     query = inline_query.query.strip()
     user_name = inline_query.from_user.first_name if inline_query.from_user else "Player"
+    user_id = inline_query.from_user.id if inline_query.from_user else "unknown"
+    username = inline_query.from_user.username if inline_query.from_user else "unknown"
 
-    # Whitelist check for inline queries: only allowed chat/user IDs may roll
-    if inline_query.from_user and inline_query.from_user.id not in config.allowed_chat_ids:
-        await inline_query.answer(
-            results=[],
-            switch_pm_text="Access restricted to authorized users",
-            switch_pm_parameter="start",
-            cache_time=1,
-            is_personal=True,
-        )
-        return
+    logger.info(
+        "Received inline dice query from user %s (@%s): '%s'",
+        user_id,
+        username,
+        query,
+    )
 
     results: list[InlineQueryResultArticle] = []
 
@@ -320,8 +318,9 @@ async def inline_dice_handler(inline_query: InlineQuery):
                 )
             )
     else:
+        cleaned_query, _ = DiceParser.normalize_input(query)
         try:
-            res = DiceParser.parse_and_roll(query)
+            res = DiceParser.parse_and_roll(cleaned_query)
             text = res.format_html(user_name)
             results.append(
                 InlineQueryResultArticle(
