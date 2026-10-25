@@ -83,13 +83,13 @@ def test_resolve_pinterest_url_and_lru_caching():
 
 def test_pinterest_url_normalization():
     norm1 = normalize_media_url("https://www.pinterest.com/pin/1234567890/?invite_code=abc")
-    assert norm1 == "pinterest:v2:pin:1234567890"
+    assert norm1 == "pinterest:v3:pin:1234567890"
 
     norm2 = normalize_media_url("https://www.pinterest.com/pin/cool-title--987654321/")
-    assert norm2 == "pinterest:v2:pin:987654321"
+    assert norm2 == "pinterest:v3:pin:987654321"
 
     norm_short = normalize_media_url("https://pin.it/xyz123")
-    assert norm_short == "pinterest:v2:shortlink:xyz123"
+    assert norm_short == "pinterest:v3:shortlink:xyz123"
 
 
 @pytest.mark.asyncio
@@ -99,7 +99,7 @@ async def test_pinterest_canonical_cache_key():
         return_value="https://www.pinterest.com/pin/1234567890/",
     ):
         key = await get_canonical_cache_key("https://pin.it/xyz123", platform="pinterest")
-        assert key == "pinterest:v2:pin:1234567890"
+        assert key == "pinterest:v3:pin:1234567890"
 
 
 def test_platform_registry_supports_pinterest(tmp_path: Path):
@@ -191,6 +191,62 @@ async def test_pinterest_download_single_photo(tmp_path: Path):
         assert res.title == "Single Aesthetic Photo"
         assert res.is_gallery is False
         assert res.filepath.name == f"{pin_id}.jpg"
+        assert res.filepath.exists()
+
+
+@pytest.mark.asyncio
+async def test_pinterest_download_single_video_from_story_pin(tmp_path: Path):
+    core = MediaDownloaderCore(download_dir=tmp_path)
+    service = PinterestService(core)
+
+    pin_id = "876864989963745171"
+    raw_api_data = {
+        "title": "Aesthetic Video Pin",
+        "closeup_attribution": {"full_name": "Video Creator"},
+        "storyPinData": {
+            "pages": [
+                {
+                    "blocks": [
+                        {
+                            "videoDataV2": {
+                                "videoList720P": {
+                                    "v720P": {
+                                        "url": "https://v1.pinimg.com/videos/iht/expMp4/test_720w.mp4",
+                                        "width": 1440,
+                                        "height": 1440,
+                                        "duration": 16367,
+                                    }
+                                }
+                            }
+                        }
+                    ]
+                }
+            ]
+        },
+    }
+
+    with (
+        patch(
+            "downloader.platforms.pinterest.resolve_pinterest_url",
+            return_value=f"https://www.pinterest.com/pin/{pin_id}/",
+        ),
+        patch.object(service, "_fetch_pin_data_sync", return_value=raw_api_data),
+        patch("downloader.platforms.pinterest.download_url_to_file") as mock_dl_file,
+    ):
+
+        def fake_dl(url, path):
+            Path(path).write_bytes(b"video_bytes")
+
+        mock_dl_file.side_effect = fake_dl
+
+        res = await service.download("https://pin.it/1rhkhuVRO")
+        assert res.title == "Aesthetic Video Pin"
+        assert res.artist == "Video Creator"
+        assert res.is_gallery is False
+        assert res.filepath.name == f"{pin_id}.mp4"
+        assert res.duration == 16
+        assert res.width == 1440
+        assert res.height == 1440
         assert res.filepath.exists()
 
 
