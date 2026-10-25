@@ -74,11 +74,12 @@ dp.callback_query.outer_middleware(
 )
 
 
-def format_duration(seconds: int | None) -> str:
+def format_duration(seconds: int | float | None) -> str:
     """Format duration in seconds to HH:MM:SS or MM:SS."""
     if not seconds:
         return "N/A"
-    mins, secs = divmod(seconds, 60)
+    sec = int(round(seconds))
+    mins, secs = divmod(sec, 60)
     hours, mins = divmod(mins, 60)
     if hours:
         return f"{hours:02d}:{mins:02d}:{secs:02d}"
@@ -202,7 +203,7 @@ async def send_downloaded_media(
             title=downloaded.track or downloaded.title,
             performer=downloaded.artist or "Unknown Artist",
             thumbnail=thumb_input,
-            duration=downloaded.duration or 0,
+            duration=int(round(downloaded.duration)) if downloaded.duration else 0,
         )
     elif ext in {".jpg", ".jpeg", ".png", ".webp"}:
         await message.reply_photo(photo=file_input, caption=caption)
@@ -210,9 +211,9 @@ async def send_downloaded_media(
         await message.reply_video(
             video=file_input,
             caption=caption,
-            duration=downloaded.duration or 0,
-            width=downloaded.width or 0,
-            height=downloaded.height or 0,
+            duration=int(round(downloaded.duration)) if downloaded.duration else 0,
+            width=int(round(downloaded.width)) if downloaded.width else 0,
+            height=int(round(downloaded.height)) if downloaded.height else 0,
             supports_streaming=True,
         )
 

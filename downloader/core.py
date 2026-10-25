@@ -128,10 +128,10 @@ class MediaDownloaderCore:
                 ),
                 track=info.get("track") or info.get("title"),
                 album=info.get("album"),
-                duration=info.get("duration"),
+                duration=int(round(info["duration"])) if info.get("duration") is not None else None,
                 thumbnail=info.get("thumbnail"),
-                width=info.get("width"),
-                height=info.get("height"),
+                width=int(round(info["width"])) if info.get("width") is not None else None,
+                height=int(round(info["height"])) if info.get("height") is not None else None,
                 filesize=info.get("filesize") or info.get("filesize_approx"),
                 extractor=info.get("extractor") or "",
                 formats=info.get("formats") or [],
@@ -210,7 +210,9 @@ class MediaDownloaderCore:
                         artist=clean_artist,
                         track=clean_track,
                         album=info.get("album"),
-                        duration=info.get("duration"),
+                        duration=int(round(info["duration"]))
+                        if info.get("duration") is not None
+                        else None,
                         filesize=total_filesize,
                         temp_dir=temp_dir,
                         is_gallery=True,
@@ -236,7 +238,9 @@ class MediaDownloaderCore:
                     artist=clean_artist,
                     track=clean_track,
                     album=info.get("album"),
-                    duration=info.get("duration"),
+                    duration=int(round(info["duration"]))
+                    if info.get("duration") is not None
+                    else None,
                     filesize=photo_path.stat().st_size,
                     temp_dir=temp_dir,
                 )
@@ -323,10 +327,10 @@ class MediaDownloaderCore:
                 artist=clean_artist,
                 track=clean_track,
                 album=info.get("album"),
-                duration=info.get("duration"),
+                duration=int(round(info["duration"])) if info.get("duration") is not None else None,
                 thumbnail_path=thumbnail_path,
-                width=info.get("width"),
-                height=info.get("height"),
+                width=int(round(info["width"])) if info.get("width") is not None else None,
+                height=int(round(info["height"])) if info.get("height") is not None else None,
                 filesize=filesize,
                 temp_dir=temp_dir,
             )
