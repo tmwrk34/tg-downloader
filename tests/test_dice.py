@@ -280,3 +280,89 @@ async def test_dice_filter_cyrillic():
     # Slash commands with Cyrillic aliases should be skipped by DiceFilter
     assert await d_filter(create_message("/ролл 2д20")) is False
     assert await d_filter(create_message("/дмролл 2к20")) is False
+
+
+@pytest.mark.asyncio
+async def test_inline_dice_handler_empty_query():
+    from unittest.mock import AsyncMock
+
+    from aiogram.types import InlineQuery
+
+    from bot import inline_dice_handler
+
+    iq = InlineQuery(
+        id="iq1",
+        from_user=User(id=99999, is_bot=False, first_name="Adventurer", username="adv"),
+        query="",
+        offset="",
+    )
+    with patch.object(InlineQuery, "answer", new_callable=AsyncMock) as mock_answer:
+        await inline_dice_handler(iq)
+        mock_answer.assert_awaited_once()
+        _, kwargs = mock_answer.call_args
+        results = kwargs.get("results")
+        assert len(results) >= 8
+        assert any(r.id == "preset_d20" for r in results)
+
+
+@pytest.mark.asyncio
+async def test_inline_dice_handler_expression_and_cyrillic():
+    from unittest.mock import AsyncMock
+
+    from aiogram.types import InlineQuery
+
+    from bot import inline_dice_handler
+
+    # English expression
+    iq = InlineQuery(
+        id="iq2",
+        from_user=User(id=99999, is_bot=False, first_name="Adventurer", username="adv"),
+        query="2d6+3",
+        offset="",
+    )
+    with patch.object(InlineQuery, "answer", new_callable=AsyncMock) as mock_answer:
+        await inline_dice_handler(iq)
+        mock_answer.assert_awaited_once()
+        _, kwargs = mock_answer.call_args
+        results = kwargs.get("results")
+        assert len(results) == 1
+        assert "Roll 2d6+3" in results[0].title
+
+    # Cyrillic with natural language: "roll 2д20"
+    iq_cyr = InlineQuery(
+        id="iq3",
+        from_user=User(id=99999, is_bot=False, first_name="Adventurer", username="adv"),
+        query="roll 2д20",
+        offset="",
+    )
+    with patch.object(InlineQuery, "answer", new_callable=AsyncMock) as mock_answer:
+        await inline_dice_handler(iq_cyr)
+        mock_answer.assert_awaited_once()
+        _, kwargs = mock_answer.call_args
+        results = kwargs.get("results")
+        assert len(results) == 1
+        assert "Roll 2d20" in results[0].title
+
+
+@pytest.mark.asyncio
+async def test_inline_dice_handler_invalid_query():
+    from unittest.mock import AsyncMock
+
+    from aiogram.types import InlineQuery
+
+    from bot import inline_dice_handler
+
+    iq = InlineQuery(
+        id="iq4",
+        from_user=User(id=99999, is_bot=False, first_name="Adventurer", username="adv"),
+        query="not_a_die",
+        offset="",
+    )
+    with patch.object(InlineQuery, "answer", new_callable=AsyncMock) as mock_answer:
+        await inline_dice_handler(iq)
+        mock_answer.assert_awaited_once()
+        _, kwargs = mock_answer.call_args
+        results = kwargs.get("results")
+        assert len(results) == 1
+        assert results[0].id == "err_invalid"
+        assert "Invalid Dice Expression" in results[0].title
