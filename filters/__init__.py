@@ -1,3 +1,4 @@
+from filters.dice import DiceFilter
 from filters.media import MediaUrlFilter
 from filters.patterns import (
     MEDIA_PATTERNS,
@@ -9,6 +10,7 @@ from filters.patterns import (
 from filters.triggers import TriggerPhraseFilter
 
 __all__ = [
+    "DiceFilter",
     "MEDIA_PATTERNS",
     "MediaUrlFilter",
     "Platform",
