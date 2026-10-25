@@ -6,6 +6,7 @@ import uuid
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -36,6 +37,11 @@ from downloader import (
 )
 from filters import DiceFilter, MediaUrlFilter, TriggerPhraseFilter
 from middlewares import WhitelistMiddleware
+from services.cache import (
+    CachedMedia,
+    MediaCache,
+    get_canonical_cache_key,
+)
 from services.dice import DiceParser, get_secret_roll, store_secret_roll
 
 # Payload and runtime safety thresholds
@@ -63,6 +69,7 @@ config = load_config()
 dp = Dispatcher()
 downloader_core = MediaDownloaderCore(download_dir="./downloads")
 platform_registry = PlatformServiceRegistry(downloader_core)
+media_cache = MediaCache()
 
 # Register WhitelistMiddleware at the outer layer
 dp.message.outer_middleware(
@@ -349,13 +356,96 @@ async def inline_dice_handler(inline_query: InlineQuery):
     await inline_query.answer(results=results, cache_time=1, is_personal=True)
 
 
+async def send_cached_media(message: Message, cached: CachedMedia) -> bool:
+    """
+    Deliver media instantly using Telegram file_id from cache.
+    Raises TelegramAPIError if the file_id is invalid or rejected by Telegram.
+    """
+    if cached.media_type == "video":
+        if not cached.file_id:
+            return False
+        await message.reply_video(
+            video=cached.file_id,
+            caption=cached.caption,
+            duration=int(cached.extra_data.get("duration", 0)),
+            width=int(cached.extra_data.get("width", 0)),
+            height=int(cached.extra_data.get("height", 0)),
+            supports_streaming=True,
+        )
+        return True
+
+    elif cached.media_type == "photo":
+        if not cached.file_id:
+            return False
+        await message.reply_photo(
+            photo=cached.file_id,
+            caption=cached.caption,
+        )
+        return True
+
+    elif cached.media_type == "audio":
+        if not cached.file_id:
+            return False
+        await message.reply_audio(
+            audio=cached.file_id,
+            title=cached.extra_data.get("title"),
+            performer=cached.extra_data.get("performer"),
+            duration=int(cached.extra_data.get("duration", 0)),
+        )
+        return True
+
+    elif cached.media_type == "album":
+        items = cached.extra_data.get("items", [])
+        if not items:
+            return False
+
+        if len(items) == 1:
+            it = items[0]
+            if it["type"] == "video":
+                await message.reply_video(
+                    video=it["file_id"],
+                    caption=cached.caption,
+                    supports_streaming=True,
+                )
+            else:
+                await message.reply_photo(
+                    photo=it["file_id"],
+                    caption=cached.caption,
+                )
+        else:
+            chunks = [items[i : i + 10] for i in range(0, len(items), 10)]
+            for chunk_idx, chunk in enumerate(chunks):
+                caption_str = cached.caption if chunk_idx == 0 else None
+                media_group: list[InputMediaPhoto | InputMediaVideo] = []
+                for item_idx, it in enumerate(chunk):
+                    c = caption_str if item_idx == 0 else None
+                    if it["type"] == "video":
+                        media_group.append(InputMediaVideo(media=it["file_id"], caption=c))
+                    else:
+                        media_group.append(InputMediaPhoto(media=it["file_id"], caption=c))
+                await message.reply_media_group(media=media_group)
+
+        audio_file_id = cached.extra_data.get("audio_file_id")
+        if audio_file_id:
+            await message.reply_audio(
+                audio=audio_file_id,
+                title=cached.extra_data.get("audio_title"),
+                performer=cached.extra_data.get("audio_performer", "Unknown Artist"),
+            )
+        return True
+
+    return False
+
+
 async def send_downloaded_media(
     message: Message,
     downloaded: DownloadedMedia,
     is_audio_only: bool = False,
+    cache_key: str | None = None,
 ) -> bool:
     """
     Validate filesize against configured bot payload limits and send the media.
+    Optionally saves the sent file_id to the media cache if cache_key is provided.
     Returns True if media was successfully sent, False if rejected due to size.
     """
     if downloaded.filesize > config.max_payload_bytes:
@@ -370,16 +460,23 @@ async def send_downloaded_media(
     # Gallery / Carousel mode (e.g. Instagram / TikTok albums)
     if downloaded.is_gallery and downloaded.gallery_items:
         items = downloaded.gallery_items
+        album_items: list[dict[str, str]] = []
         if len(items) == 1:
             m_type, path = items[0]
             file_input = FSInputFile(path)
             caption = f"🎬 {downloaded.title}" if downloaded.title else ""
             if m_type == "video":
-                await message.reply_video(
+                sent_msg = await message.reply_video(
                     video=file_input, caption=caption, supports_streaming=True
                 )
+                vid = getattr(sent_msg, "video", None)
+                if vid and getattr(vid, "file_id", None):
+                    album_items.append({"type": "video", "file_id": vid.file_id})
             else:
-                await message.reply_photo(photo=file_input, caption=caption)
+                sent_msg = await message.reply_photo(photo=file_input, caption=caption)
+                photos = getattr(sent_msg, "photo", None)
+                if photos and len(photos) > 0:
+                    album_items.append({"type": "photo", "file_id": photos[-1].file_id})
         else:
             chunks = [items[i : i + 10] for i in range(0, len(items), 10)]
             for chunk_idx, chunk in enumerate(chunks):
@@ -424,15 +521,44 @@ async def send_downloaded_media(
                             media_group.append(
                                 InputMediaPhoto(media=file_input, caption=item_caption)
                             )
-                    await message.reply_media_group(media=media_group)
+                    sent_msgs = await message.reply_media_group(media=media_group)
+                    if sent_msgs and isinstance(sent_msgs, list):
+                        for sm in sent_msgs:
+                            vid = getattr(sm, "video", None)
+                            photos = getattr(sm, "photo", None)
+                            if vid and getattr(vid, "file_id", None):
+                                album_items.append({"type": "video", "file_id": vid.file_id})
+                            elif photos and len(photos) > 0:
+                                album_items.append({"type": "photo", "file_id": photos[-1].file_id})
 
+        audio_file_id = None
         if downloaded.extra_audio_path and downloaded.extra_audio_path.exists():
             audio_input = FSInputFile(downloaded.extra_audio_path)
-            await message.reply_audio(
+            sent_audio = await message.reply_audio(
                 audio=audio_input,
                 title=downloaded.track or downloaded.title,
                 performer=downloaded.artist or "Unknown Artist",
             )
+            aud = getattr(sent_audio, "audio", None)
+            if aud and getattr(aud, "file_id", None):
+                audio_file_id = aud.file_id
+
+        if cache_key and album_items:
+            try:
+                await media_cache.set(
+                    cache_key=cache_key,
+                    media_type="album",
+                    file_id=None,
+                    caption=f"🎬 {downloaded.title}" if downloaded.title else "",
+                    extra_data={
+                        "items": album_items,
+                        "audio_file_id": audio_file_id,
+                        "audio_title": downloaded.track or downloaded.title,
+                        "audio_performer": downloaded.artist or "Unknown Artist",
+                    },
+                )
+            except Exception as e:
+                logger.warning("Failed to cache gallery for %s: %s", cache_key, e)
         return True
 
     caption = f"🎬 {downloaded.title}" if downloaded.title else ""
@@ -445,17 +571,45 @@ async def send_downloaded_media(
             if downloaded.thumbnail_path and downloaded.thumbnail_path.exists()
             else None
         )
-        await message.reply_audio(
+        sent_audio = await message.reply_audio(
             audio=file_input,
             title=downloaded.track or downloaded.title,
             performer=downloaded.artist or "Unknown Artist",
             thumbnail=thumb_input,
             duration=int(round(downloaded.duration)) if downloaded.duration else 0,
         )
+        aud = getattr(sent_audio, "audio", None)
+        if cache_key and aud and getattr(aud, "file_id", None):
+            try:
+                await media_cache.set(
+                    cache_key=cache_key,
+                    media_type="audio",
+                    file_id=aud.file_id,
+                    caption="",
+                    extra_data={
+                        "title": downloaded.track or downloaded.title,
+                        "performer": downloaded.artist or "Unknown Artist",
+                        "duration": int(round(downloaded.duration)) if downloaded.duration else 0,
+                    },
+                )
+            except Exception as e:
+                logger.warning("Failed to cache audio for %s: %s", cache_key, e)
     elif ext in {".jpg", ".jpeg", ".png", ".webp"}:
-        await message.reply_photo(photo=file_input, caption=caption)
+        sent_photo = await message.reply_photo(photo=file_input, caption=caption)
+        photos = getattr(sent_photo, "photo", None)
+        if cache_key and photos and len(photos) > 0:
+            try:
+                await media_cache.set(
+                    cache_key=cache_key,
+                    media_type="photo",
+                    file_id=photos[-1].file_id,
+                    caption=caption,
+                    extra_data={},
+                )
+            except Exception as e:
+                logger.warning("Failed to cache photo for %s: %s", cache_key, e)
     else:
-        await message.reply_video(
+        sent_video = await message.reply_video(
             video=file_input,
             caption=caption,
             duration=int(round(downloaded.duration)) if downloaded.duration else 0,
@@ -463,6 +617,22 @@ async def send_downloaded_media(
             height=int(round(downloaded.height)) if downloaded.height else 0,
             supports_streaming=True,
         )
+        vid = getattr(sent_video, "video", None)
+        if cache_key and vid and getattr(vid, "file_id", None):
+            try:
+                await media_cache.set(
+                    cache_key=cache_key,
+                    media_type="video",
+                    file_id=vid.file_id,
+                    caption=caption,
+                    extra_data={
+                        "duration": int(round(downloaded.duration)) if downloaded.duration else 0,
+                        "width": int(round(downloaded.width)) if downloaded.width else 0,
+                        "height": int(round(downloaded.height)) if downloaded.height else 0,
+                    },
+                )
+            except Exception as e:
+                logger.warning("Failed to cache video for %s: %s", cache_key, e)
 
     return True
 
@@ -478,13 +648,36 @@ async def media_url_handler(message: Message, url: str, platform: str):
         await message.reply("Unsupported platform.")
         return
 
-    # For YouTube: prompt user with resolution and audio options via inline keyboard
-    # (except for YouTube Shorts which are downloaded immediately like TikTok/Instagram)
-    if (
+    # Check cache for immediate delivery (TikTok, Instagram, YouTube Shorts, etc.)
+    # (except for long-form YouTube videos where quality selection is prompted first)
+    is_yt_long = (
         platform == "youtube"
         and isinstance(service, YouTubeService)
         and not YouTubeService.is_short(url)
-    ):
+    )
+
+    cache_key: str | None = None
+    if not is_yt_long:
+        cache_key = await get_canonical_cache_key(url, platform=platform)
+        cached = await media_cache.get(cache_key)
+        if cached:
+            try:
+                sent = await send_cached_media(message, cached)
+                if sent:
+                    logger.info("Cache HIT: Delivered %s (%s)", platform, cache_key)
+                    return
+            except TelegramAPIError as e:
+                logger.warning(
+                    "Cached media send failed for %s (%s), purging cache and downloading: %s",
+                    cache_key,
+                    type(e).__name__,
+                    e,
+                )
+                await media_cache.delete(cache_key)
+
+    # For YouTube: prompt user with resolution and audio options via inline keyboard
+    # (except for YouTube Shorts which are downloaded immediately like TikTok/Instagram)
+    if is_yt_long:
         video_id = YouTubeService.extract_video_id(url)
         if video_id:
             status_msg = await message.reply("Fetching YouTube media information... ⏳")
@@ -570,7 +763,7 @@ async def media_url_handler(message: Message, url: str, platform: str):
             timeout=DOWNLOAD_TIMEOUT_SECONDS,
         )
         async with downloaded:
-            sent = await send_downloaded_media(status_msg, downloaded)
+            sent = await send_downloaded_media(status_msg, downloaded, cache_key=cache_key)
             if sent:
                 await status_msg.delete()
     except TimeoutError:
@@ -595,6 +788,24 @@ async def youtube_callback_handler(callback: CallbackQuery):
         return
 
     _, quality, video_id = parts
+    cache_key = f"youtube:{video_id}:{quality}"
+    cached = await media_cache.get(cache_key)
+    if cached:
+        try:
+            if callback.message and isinstance(callback.message, Message):
+                sent = await send_cached_media(callback.message, cached)
+                if sent:
+                    await callback.message.delete()
+                    logger.info("Cache HIT: Delivered YouTube %s (%s)", quality, cache_key)
+                    return
+        except TelegramAPIError as e:
+            logger.warning(
+                "Cached YouTube file_id failed (%s), invalidating cache: %s",
+                type(e).__name__,
+                e,
+            )
+            await media_cache.delete(cache_key)
+
     url = f"https://www.youtube.com/watch?v={video_id}"
     service = platform_registry.get_service_by_name("youtube")
     if not service or not isinstance(service, YouTubeService):
@@ -651,7 +862,10 @@ async def youtube_callback_handler(callback: CallbackQuery):
         async with downloaded:
             if callback.message and isinstance(callback.message, Message):
                 sent = await send_downloaded_media(
-                    callback.message, downloaded, is_audio_only=(quality == "audio")
+                    callback.message,
+                    downloaded,
+                    is_audio_only=(quality == "audio"),
+                    cache_key=cache_key,
                 )
                 if sent:
                     await callback.message.delete()

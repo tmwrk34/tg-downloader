@@ -25,6 +25,12 @@ A high-performance Telegram bot built with **aiogram 3** and **yt-dlp** for down
 - Bypasses the default Telegram cloud 50MB bot upload limit, enabling file transfers up to **2000MB (2GB)**.
 - Automatically activated when `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` are provided in the environment.
 
+### ⚡ High-Speed Caching Layer
+- **Instant Media Redelivery**: Caches Telegram `file_id` for uploaded videos, photos, audios, and carousel albums in a persistent SQLite WAL database (`data/media_cache.db`).
+- **Zero I/O Cache Hits**: Bypasses `yt-dlp` and `ffmpeg` transcoding on duplicate or reposted URLs, delivering media within milliseconds (< 200ms).
+- **Aggressive URL Normalization**: Automatically strips platform tracking parameters (`?igsh=...`, `?si=...`, `?rpxt=...`, `&utm_source=...`) and resolves shortlinks (`vt.tiktok.com`, `vm.tiktok.com`) so different share links pointing to the same media map to the same cache key.
+- **Graceful Error Recovery**: If a cached `file_id` is invalidated or expired by Telegram, the bot purges the entry and falls back to a fresh download automatically.
+
 ### 🎲 Tabletop D&D Dice Roller
 - **Commands**:
   - `/roll [expression]` (aliases: `/ролл`, `/кинь`, `/кидок`) — roll dice publicly (defaults to `d20`).
