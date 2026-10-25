@@ -13,6 +13,8 @@ env/
 .env
 .env.*
 !.env.example
+*cookies*.txt
+cookies.txt
 
 # Local runtime directories & volumes
 downloads/

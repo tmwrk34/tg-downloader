@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,27 @@ from downloader.platforms.base import BasePlatformService
 from filters.patterns import MEDIA_PATTERNS, Platform
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_tiktok_url(url: str, timeout: int = 10) -> str:
+    """Resolve TikTok shortlinks (vt.tiktok.com, vm.tiktok.com) to their canonical URL."""
+    if "vt.tiktok.com" not in url and "vm.tiktok.com" not in url:
+        return url
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+                )
+            },
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.geturl()
+    except Exception as e:
+        logger.warning("Failed to resolve TikTok shortlink %s: %s", url, e)
+        return url
 
 
 class TikTokService(BasePlatformService):
@@ -125,9 +147,10 @@ class TikTokService(BasePlatformService):
         url: str,
         extra_opts: dict[str, Any] | None = None,
     ) -> MediaMetadata:
-        if "/photo/" in url:
-            return await asyncio.to_thread(self._extract_photo_metadata_sync, url)
-        norm_url = re.sub(r"/photo/(\d+)", r"/video/\1", url)
+        resolved_url = await asyncio.to_thread(resolve_tiktok_url, url)
+        if "/photo/" in resolved_url:
+            return await asyncio.to_thread(self._extract_photo_metadata_sync, resolved_url)
+        norm_url = re.sub(r"/photo/(\d+)", r"/video/\1", resolved_url)
         return await super().extract_metadata(norm_url, extra_opts=extra_opts)
 
     async def download(
@@ -135,7 +158,8 @@ class TikTokService(BasePlatformService):
         url: str,
         extra_opts: dict[str, Any] | None = None,
     ) -> DownloadedMedia:
-        if "/photo/" in url:
-            return await asyncio.to_thread(self._download_photo_slideshow_sync, url)
-        norm_url = re.sub(r"/photo/(\d+)", r"/video/\1", url)
+        resolved_url = await asyncio.to_thread(resolve_tiktok_url, url)
+        if "/photo/" in resolved_url:
+            return await asyncio.to_thread(self._download_photo_slideshow_sync, resolved_url)
+        norm_url = re.sub(r"/photo/(\d+)", r"/video/\1", resolved_url)
         return await super().download(norm_url, extra_opts=extra_opts)

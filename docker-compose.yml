@@ -9,7 +9,7 @@ services:
       - .env
     volumes:
       - bot_downloads:/app/downloads
-      - bot_data:/app/data
+      - ./data:/app/data
     depends_on:
       - telegram-bot-api
     logging:
@@ -45,6 +45,5 @@ services:
 
 volumes:
   bot_downloads:
-  bot_data:
   bot_api_data:
 
