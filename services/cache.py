@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
+from downloader.platforms.pinterest import resolve_pinterest_url
 from downloader.platforms.tiktok import resolve_tiktok_url
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,14 @@ _TT_PHOTO_NORM_RE = re.compile(
 )
 _TT_SHORTLINK_NORM_RE = re.compile(
     r"(?:vm|vt)\.tiktok\.com/([a-zA-Z0-9_-]+)",
+    re.IGNORECASE,
+)
+_PIN_NORM_RE = re.compile(
+    r"pinterest\.[a-z.]+/pin/(?:[\w-]+--)?(\d+)",
+    re.IGNORECASE,
+)
+_PIN_SHORTLINK_NORM_RE = re.compile(
+    r"pin\.it/([a-zA-Z0-9]+)",
     re.IGNORECASE,
 )
 _TW_NORM_RE = re.compile(
@@ -149,12 +158,21 @@ def normalize_media_url(
     if tt_shortlink_match:
         return f"tiktok:shortlink:{tt_shortlink_match.group(1)}"
 
-    # 4. Twitter / X normalization
+    # 4. Pinterest normalization
+    pin_match = _PIN_NORM_RE.search(clean_url_str)
+    if pin_match:
+        return f"pinterest:pin:{pin_match.group(1)}"
+
+    pin_short_match = _PIN_SHORTLINK_NORM_RE.search(clean_url_str)
+    if pin_short_match:
+        return f"pinterest:shortlink:{pin_short_match.group(1)}"
+
+    # 5. Twitter / X normalization
     tw_match = _TW_NORM_RE.search(clean_url_str)
     if tw_match:
         return f"twitter:status:{tw_match.group(1)}"
 
-    # 5. Generic URL normalization (strip tracking parameters)
+    # 6. Generic URL normalization (strip tracking parameters)
     parsed = urlparse(clean_url_str)
     query_dict = parse_qs(parsed.query, keep_blank_values=False)
     filtered_query = {k: v for k, v in query_dict.items() if k.lower() not in TRACKING_QUERY_PARAMS}
@@ -197,6 +215,15 @@ async def get_canonical_cache_key(
             return normalize_media_url(resolved, platform="tiktok", quality=quality)
         except Exception as e:
             logger.warning("Could not resolve TikTok shortlink %s for cache key: %s", clean_url, e)
+
+    if "pin.it" in clean_url:
+        try:
+            resolved = await asyncio.to_thread(resolve_pinterest_url, clean_url)
+            return normalize_media_url(resolved, platform="pinterest", quality=quality)
+        except Exception as e:
+            logger.warning(
+                "Could not resolve Pinterest shortlink %s for cache key: %s", clean_url, e
+            )
 
     return normalize_media_url(clean_url, platform=platform, quality=quality)
 

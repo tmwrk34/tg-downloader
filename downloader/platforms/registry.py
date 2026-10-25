@@ -3,6 +3,7 @@ from collections.abc import Iterable
 from downloader.core import MediaDownloaderCore
 from downloader.platforms.base import BasePlatformService
 from downloader.platforms.instagram import InstagramService
+from downloader.platforms.pinterest import PinterestService
 from downloader.platforms.tiktok import TikTokService
 from downloader.platforms.youtube import YouTubeService
 
@@ -44,6 +45,7 @@ class PlatformServiceRegistry:
         self.register(TikTokService(self.core))
         self.register(InstagramService(self.core))
         self.register(YouTubeService(self.core))
+        self.register(PinterestService(self.core))
 
     def all_services(self) -> list[BasePlatformService]:
         """List all registered service adapters."""
