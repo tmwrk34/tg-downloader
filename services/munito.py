@@ -40,7 +40,7 @@ AVAILABLE_MODELS = [
     "google/gemma-4-12b",
 ]
 
-REASONING_EFFORT_LEVELS = ["low", "none", "high"]
+REASONING_EFFORT_LEVELS = ["low", "medium", "high"]
 
 
 def resolve_default_ai_db() -> str:
@@ -105,7 +105,8 @@ def format_ai_card(
     status_str = "🟢 Enabled" if cfg.enabled else "🔴 Disabled"
     effort_labels = {
         "low": "⚡ Low (Fast, ~15s)",
-        "none": "💨 None (Instant, ~3s)",
+        "none": "⚡ Low (Fast, ~15s)",
+        "medium": "⚖️ Medium (~35s)",
         "high": "🧠 High (Deep CoT, ~90s)",
     }
     effort_display = effort_labels.get(cfg.reasoning_effort, cfg.reasoning_effort)
@@ -572,17 +573,17 @@ class MunitoAIService:
             "stream": False,
         }
 
-        if "deepseek" in target_model.lower() or "qwen" in target_model.lower():
-            effort = cfg.reasoning_effort if chat_id is not None else "low"
-            if effort == "none":
-                payload["chat_template_kwargs"] = {"enable_thinking": False, "thinking": False}
-                if messages and messages[0].get("role") == "system":
-                    messages[0]["content"] += (
-                        "\nRespond immediately and concisely without any chain of thought or internal thinking."
-                    )
-            else:
-                payload["reasoning_effort"] = effort
-                payload["chat_template_kwargs"] = {"enable_thinking": True, "thinking": True}
+        if "deepseek" in target_model.lower():
+            raw_effort = (cfg.reasoning_effort or "low").lower() if chat_id is not None else "low"
+            # OpenAI / Munito reasoning_effort strictly supports 'low', 'medium', 'high'
+            effort = "low" if raw_effort in {"none", "low"} else raw_effort
+            if effort not in {"low", "medium", "high"}:
+                effort = "low"
+            payload["reasoning_effort"] = effort
+            if raw_effort in {"none", "low"} and messages and messages[0].get("role") == "system":
+                messages[0]["content"] += (
+                    "\nKeep responses concise and direct without unnecessary filler."
+                )
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",

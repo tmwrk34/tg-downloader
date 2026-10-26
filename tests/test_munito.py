@@ -553,13 +553,13 @@ async def test_munito_command_and_callback_handlers(tmp_path: Path):
         # 6. /ai effort
         with patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply:
             await ai_command_handler(
-                msg, CommandObject(prefix="/", command="ai", args="effort none")
+                msg, CommandObject(prefix="/", command="ai", args="effort medium")
             )
             assert mock_reply.call_count == 1
             assert "Thinking:" in mock_reply.call_args[0][0]
-            assert "None (Instant" in mock_reply.call_args[0][0]
+            assert "Medium" in mock_reply.call_args[0][0]
             cfg = await test_svc.get_chat_config(chat_id)
-            assert cfg.reasoning_effort == "none"
+            assert cfg.reasoning_effort == "medium"
 
         with patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply:
             await ai_command_handler(
