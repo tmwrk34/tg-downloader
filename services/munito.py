@@ -9,6 +9,7 @@ import asyncio
 import base64
 import contextlib
 import html
+import json
 import logging
 import os
 import re
@@ -22,16 +23,55 @@ from typing import Any
 import aiohttp
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from services.dice import DiceParser
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are a helpful, witty, and concise AI assistant in a Telegram group chat. "
-    "Format your answers clearly, be brief and direct, and avoid unnecessary filler or repetition. "
-    "Always respond in the exact same language as the user's current prompt or message "
-    "(e.g., if asked in Ukrainian, reply in Ukrainian; if asked in Russian, reply in Russian; "
-    "if asked in English, reply in English). "
-    "If analyzing an image or text from chat, be accurate and informative."
+    "You are Bard (Бард), a witty, observant, and genuinely helpful AI assistant and digital companion in this Telegram chat and tavern.\n\n"
+    "Identity & Capabilities:\n"
+    "- Your name is Bard (@bard_taverna_bot).\n"
+    "- You are the heart of this tavern bot. Your actual capabilities include:\n"
+    "  1. Media Downloader: Automatically downloads videos and audio from TikTok, YouTube, Instagram Reels/Posts, and Pinterest when users share links in the chat.\n"
+    "  2. Tabletop Dice Roller: Rolls dice for tabletop RPGs (D&D, Pathfinder, etc.) via /roll (e.g. /roll 2d20+5, 1d100, 4d6kh3, or natural requests like 'кинь d20').\n"
+    "  3. AI Assistant & Vision: You understand images/photos, answer questions, provide summaries, and maintain rolling conversation context memory per chat.\n"
+    "  4. Tavern Chatter: You learn local chat lore and occasionally chime in with humor or reactions.\n"
+    "- If asked who you are or what you can do, proudly describe your identity and features as Bard without mentioning underlying cloud or model providers (like Munito, DeepSeek, or Qwen) unless explicitly asked about technical architecture.\n\n"
+    "Tool Usage:\n"
+    "- You have access to real tools such as roll_dice to execute cryptographically secure tabletop dice rolls.\n"
+    "- Whenever a user asks you to roll a die, make a skill check, roll for initiative/damage, or settle a dispute with dice, ALWAYS invoke the roll_dice tool instead of guessing or hallucinating numbers.\n\n"
+    "Communication Style:\n"
+    "- Always respond in the exact same language as the user's current prompt or message (e.g. if asked in Ukrainian, reply in Ukrainian; if asked in Russian, reply in Russian; if asked in English, reply in English).\n"
+    "- Be witty, charismatic, and concise. Avoid robotic filler, repetitive disclaimers, or corporate apologies.\n"
+    "- Format answers cleanly using Telegram-friendly HTML/Markdown when appropriate."
 )
+
+AI_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "roll_dice",
+            "description": (
+                "Roll tabletop RPG dice using standard notation (e.g. '1d20', '2d6+5', '4d6kh3', '1d100', '2d20kl1'). "
+                "Evaluates real cryptographically secure random rolls with kept/dropped status, modifiers, and critical hit/fail detection."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {
+                        "type": "string",
+                        "description": "Standard dice notation expression, e.g. '1d20', '2d6+4', '3d8', '1d100', '4d6kh3'",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Optional in-game reason, action, or skill check name (e.g. 'stealth check', 'атака', 'перевірка уважності')",
+                    },
+                },
+                "required": ["expression"],
+            },
+        },
+    }
+]
 
 DEFAULT_MODEL = "deepseek-ai/deepseek-v4.1-flash-1017"
 
@@ -732,6 +772,77 @@ class MunitoAIService:
             except Exception:
                 pass
 
+    async def _send_completion_request(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        payload: dict[str, Any],
+        headers: dict[str, str],
+        chat_id: int | None,
+        target_model: str,
+        reasoning_info: str,
+        vision_info: str,
+    ) -> tuple[dict[str, Any], tuple[int, int, int]]:
+        """Execute a single HTTP chat completion request against Munito API."""
+        start_time = asyncio.get_event_loop().time()
+        try:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status == 401:
+                    logger.error("Munito AI error: 401 Unauthorized (invalid API key)")
+                    raise RuntimeError("Invalid or unauthorized Munito API key (HTTP 401).")
+                if resp.status == 429:
+                    logger.warning("Munito AI error: 429 Rate limit exceeded")
+                    raise RuntimeError(
+                        "Munito AI rate limit reached. Please wait a minute before retrying."
+                    )
+                if resp.status == 503:
+                    logger.warning("Munito AI error: 503 Service unavailable / no capacity")
+                    raise RuntimeError(
+                        "The model is currently overloaded on Munito servers. Please try again later."
+                    )
+                if resp.status >= 400:
+                    err_body = await resp.text()
+                    logger.error("Munito AI error HTTP %d: %s", resp.status, err_body)
+                    raise RuntimeError(f"Munito AI service error (HTTP {resp.status}).")
+
+                data = await resp.json()
+                elapsed = asyncio.get_event_loop().time() - start_time
+                usage = data.get("usage") or {}
+                p_tok = int(usage.get("prompt_tokens") or 0)
+                c_tok = int(usage.get("completion_tokens") or 0)
+                t_tok = int(usage.get("total_tokens") or (p_tok + c_tok))
+
+                logger.info(
+                    "Munito AI responded in %.2fs (chat_id=%s, model=%s, reasoning_effort=%s, vision=%s, tokens: total=%d [prompt=%d, completion=%d])",
+                    elapsed,
+                    chat_id,
+                    target_model,
+                    reasoning_info,
+                    vision_info,
+                    t_tok,
+                    p_tok,
+                    c_tok,
+                )
+                return data, (p_tok, c_tok, t_tok)
+        except TimeoutError as err:
+            elapsed = asyncio.get_event_loop().time() - start_time
+            logger.error(
+                "Munito AI request timed out after %.2fs (chat_id=%s, model=%s, reasoning_effort=%s, vision=%s)",
+                elapsed,
+                chat_id,
+                target_model,
+                reasoning_info,
+                vision_info,
+            )
+            raise RuntimeError(
+                f"Munito AI request timed out after {int(elapsed)}s. "
+                "The model is taking too long to think or process the image. "
+                "Try lowering thinking effort (/ai effort low) or switching model (/ai)."
+            ) from err
+        except aiohttp.ClientError as err:
+            logger.error("Munito AI network connection error: %s", err)
+            raise RuntimeError(f"Failed to connect to Munito AI: {err}") from err
+
     async def generate_reply(
         self,
         prompt: str,
@@ -816,6 +927,8 @@ class MunitoAIService:
             "messages": messages,
             "max_tokens": 2048,
             "stream": False,
+            "tools": AI_TOOLS,
+            "tool_choice": "auto",
         }
 
         if "deepseek" in target_model.lower():
@@ -841,7 +954,6 @@ class MunitoAIService:
             connect=30.0,
             sock_read=self.timeout_seconds,
         )
-        start_time = asyncio.get_event_loop().time()
         vision_info = f"yes ({len(image_bytes) // 1024}KB)" if image_bytes else "no"
         reasoning_info = payload.get("reasoning_effort", "n/a")
 
@@ -855,77 +967,107 @@ class MunitoAIService:
         )
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            try:
-                async with session.post(url, json=payload, headers=headers) as resp:
-                    if resp.status == 401:
-                        logger.error("Munito AI error: 401 Unauthorized (invalid API key)")
-                        raise RuntimeError("Invalid or unauthorized Munito API key (HTTP 401).")
-                    if resp.status == 429:
-                        logger.warning("Munito AI error: 429 Rate limit exceeded")
-                        raise RuntimeError(
-                            "Munito AI rate limit reached. Please wait a minute before retrying."
-                        )
-                    if resp.status == 503:
-                        logger.warning("Munito AI error: 503 Service unavailable / no capacity")
-                        raise RuntimeError(
-                            "The model is currently overloaded on Munito servers. Please try again later."
-                        )
-                    if resp.status >= 400:
-                        err_body = await resp.text()
-                        logger.error("Munito AI error HTTP %d: %s", resp.status, err_body)
-                        raise RuntimeError(f"Munito AI service error (HTTP {resp.status}).")
+            data, (p_tok, c_tok, t_tok) = await self._send_completion_request(
+                session=session,
+                url=url,
+                payload=payload,
+                headers=headers,
+                chat_id=chat_id,
+                target_model=target_model,
+                reasoning_info=reasoning_info,
+                vision_info=vision_info,
+            )
 
-                    data = await resp.json()
-                    elapsed = asyncio.get_event_loop().time() - start_time
-                    usage = data.get("usage") or {}
-                    p_tok = int(usage.get("prompt_tokens") or 0)
-                    c_tok = int(usage.get("completion_tokens") or 0)
-                    t_tok = int(usage.get("total_tokens") or (p_tok + c_tok))
+            choices = data.get("choices") or []
+            if not choices:
+                raise RuntimeError("Munito AI returned an empty response.")
 
-                    logger.info(
-                        "Munito AI responded in %.2fs (chat_id=%s, model=%s, reasoning_effort=%s, vision=%s, tokens: total=%d [prompt=%d, completion=%d])",
-                        elapsed,
-                        chat_id,
-                        target_model,
-                        reasoning_info,
-                        vision_info,
-                        t_tok,
-                        p_tok,
-                        c_tok,
-                    )
-            except TimeoutError as err:
-                elapsed = asyncio.get_event_loop().time() - start_time
-                logger.error(
-                    "Munito AI request timed out after %.2fs (chat_id=%s, model=%s, reasoning_effort=%s, vision=%s)",
-                    elapsed,
+            first_choice = choices[0]
+            message_obj = first_choice.get("message") or {}
+            tool_calls = message_obj.get("tool_calls") or []
+
+            # If the model requested tool execution (e.g. roll_dice)
+            if tool_calls:
+                logger.info(
+                    "Munito AI invoked %d tool call(s) (chat_id=%s)",
+                    len(tool_calls),
                     chat_id,
-                    target_model,
-                    reasoning_info,
-                    vision_info,
                 )
-                raise RuntimeError(
-                    f"Munito AI request timed out after {int(elapsed)}s. "
-                    "The model is taking too long to think or process the image. "
-                    "Try lowering thinking effort (/ai effort low) or switching model (/ai)."
-                ) from err
-            except aiohttp.ClientError as err:
-                logger.error("Munito AI network connection error: %s", err)
-                raise RuntimeError(f"Failed to connect to Munito AI: {err}") from err
+                messages.append(message_obj)
 
-        choices = data.get("choices") or []
-        if not choices:
-            raise RuntimeError("Munito AI returned an empty response.")
+                for tc in tool_calls:
+                    call_id = tc.get("id") or "call_default"
+                    func_info = tc.get("function") or {}
+                    func_name = func_info.get("name")
+                    raw_args = func_info.get("arguments") or "{}"
+                    try:
+                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    except Exception:
+                        args = {}
 
-        # Record token metrics
+                    if func_name == "roll_dice":
+                        expr = str(args.get("expression") or "1d20").strip()
+                        reason = args.get("reason")
+                        try:
+                            roll_res = DiceParser.parse_and_roll(expr)
+                            crit_label = None
+                            if roll_res.is_crit_hit:
+                                crit_label = "CRITICAL HIT (Natural 20!)"
+                            elif roll_res.is_crit_fail:
+                                crit_label = "CRITICAL FAIL (Natural 1!)"
+
+                            tool_output = {
+                                "expression": roll_res.normalized_expression,
+                                "total": roll_res.total,
+                                "constant_modifier": roll_res.constant_modifier,
+                                "critical": crit_label,
+                                "plain_summary": roll_res.format_plain_text(),
+                                "reason": reason,
+                            }
+                        except Exception as exc:
+                            tool_output = {
+                                "error": f"Failed to parse or roll dice expression '{expr}': {exc}"
+                            }
+
+                        messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": call_id,
+                                "name": func_name,
+                                "content": json.dumps(tool_output, ensure_ascii=False),
+                            }
+                        )
+
+                # Send follow-up request without tools so model explains the result
+                followup_payload = dict(payload)
+                followup_payload["messages"] = messages
+                followup_payload.pop("tools", None)
+                followup_payload.pop("tool_choice", None)
+
+                data2, (p2, c2, t2) = await self._send_completion_request(
+                    session=session,
+                    url=url,
+                    payload=followup_payload,
+                    headers=headers,
+                    chat_id=chat_id,
+                    target_model=target_model,
+                    reasoning_info=reasoning_info,
+                    vision_info="no",
+                )
+                p_tok += p2
+                c_tok += c2
+                t_tok += t2
+
+                choices2 = data2.get("choices") or []
+                if choices2:
+                    first_choice = choices2[0]
+                    message_obj = first_choice.get("message") or {}
+
+        # Record total token metrics across all turns
         if chat_id is not None:
-            usage = data.get("usage") or {}
-            p_tok = int(usage.get("prompt_tokens") or 0)
-            c_tok = int(usage.get("completion_tokens") or 0)
-            t_tok = int(usage.get("total_tokens") or (p_tok + c_tok))
             await self.record_usage(chat_id, p_tok, c_tok, t_tok)
 
         first_choice = choices[0]
-        message_obj = first_choice.get("message") or {}
         content = message_obj.get("content")
 
         if not content and message_obj.get("reasoning"):
