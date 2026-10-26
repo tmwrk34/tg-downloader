@@ -52,7 +52,14 @@ from services.chatter import (
     ChatterStats,
 )
 from services.dice import DiceParser, get_secret_roll, store_secret_roll
-from services.munito import MunitoAIService, split_telegram_message
+from services.munito import (
+    AVAILABLE_MODELS,
+    MunitoAIService,
+    build_ai_keyboard,
+    format_ai_card,
+    get_next_model,
+    split_telegram_message,
+)
 from services.worker import (
     MediaWorkerLimiter,
     chat_action_heartbeat,
@@ -620,6 +627,122 @@ async def chatter_callback_handler(callback: CallbackQuery):
             pass
 
 
+@dp.message(Command("ai", "munito", "grok", "assistant", "асистент"))
+async def ai_command_handler(message: Message, command: CommandObject):
+    user_id = message.from_user.id if message.from_user else 0
+    chat_id = message.chat.id
+    chat_title = message.chat.title or message.chat.first_name or "Private Chat"
+
+    if not await _is_user_chatter_admin(message.bot, chat_id, user_id):
+        await message.reply("⚠️ Тільки адміністратори чату можуть налаштовувати AI асистента.")
+        return
+
+    args = (command.args or "").strip().split()
+    cfg = await munito_service.get_chat_config(chat_id)
+
+    if args:
+        subcmd = args[0].lower()
+        if subcmd in {"on", "start", "enable", "1", "увімк", "вкл"}:
+            cfg = await munito_service.update_chat_config(chat_id, enabled=True)
+        elif subcmd in {"off", "stop", "disable", "0", "вимк", "викл"}:
+            cfg = await munito_service.update_chat_config(chat_id, enabled=False)
+        elif subcmd in {"model", "модель"} and len(args) > 1:
+            req_model = args[1].strip()
+            matched = None
+            for m in AVAILABLE_MODELS:
+                if req_model.lower() == m.lower() or req_model.lower() == m.split("/")[-1].lower():
+                    matched = m
+                    break
+            if matched:
+                cfg = await munito_service.update_chat_config(chat_id, model=matched)
+            else:
+                models_list = "\n".join(f"• <code>{m}</code>" for m in AVAILABLE_MODELS)
+                await message.reply(
+                    f"⚠️ Невідома модель: <code>{req_model}</code>.\nДоступні моделі:\n{models_list}",
+                    parse_mode="HTML",
+                )
+                return
+        elif subcmd in {"models", "моделі"}:
+            models_list = "\n".join(f"• <code>{m}</code>" for m in AVAILABLE_MODELS)
+            await message.reply(
+                f"🧠 <b>Доступні моделі Munito AI:</b>\n{models_list}\n\n"
+                f"Поточна: <code>{cfg.model}</code>\n"
+                f"Змінити: <code>/ai model &lt;назва&gt;</code> або через інлайн-кнопки.",
+                parse_mode="HTML",
+            )
+            return
+        elif subcmd in {"reset", "скинути", "clear"}:
+            await munito_service.reset_chat_stats(chat_id)
+            stats = await munito_service.get_chat_stats(chat_id)
+            text = format_ai_card(chat_title, chat_id, cfg, stats)
+            keyboard = build_ai_keyboard(chat_id, cfg)
+            await message.reply(
+                "🧹 <b>Статистику токенів скинуто!</b>\n\n" + text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+            return
+
+    stats = await munito_service.get_chat_stats(chat_id)
+    text = format_ai_card(chat_title, chat_id, cfg, stats)
+    keyboard = build_ai_keyboard(chat_id, cfg)
+    await message.reply(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("ai:"))
+async def ai_callback_handler(callback: CallbackQuery):
+    if not callback.data:
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        return
+
+    _, action, chat_id_str = parts[:3]
+    try:
+        target_chat_id = int(chat_id_str)
+    except ValueError:
+        return
+
+    user_id = callback.from_user.id if callback.from_user else 0
+    if not await _is_user_chatter_admin(callback.bot, target_chat_id, user_id):
+        await callback.answer(
+            "⚠️ Тільки адміністратори чату можуть змінювати налаштування AI.",
+            show_alert=True,
+        )
+        return
+
+    cfg = await munito_service.get_chat_config(target_chat_id)
+    confirm_reset = False
+
+    if action == "toggle":
+        cfg = await munito_service.update_chat_config(target_chat_id, enabled=not cfg.enabled)
+        await callback.answer(f"Статус AI: {'Увімкнено' if cfg.enabled else 'Вимкнено'}")
+    elif action == "model":
+        next_m = get_next_model(cfg.model)
+        cfg = await munito_service.update_chat_config(target_chat_id, model=next_m)
+        await callback.answer(f"Модель: {next_m.split('/')[-1]}")
+    elif action == "reset_prompt":
+        confirm_reset = True
+        await callback.answer()
+    elif action == "reset_confirm":
+        await munito_service.reset_chat_stats(target_chat_id)
+        await callback.answer("Статистику токенів скинуто!", show_alert=True)
+    elif action == "refresh":
+        await callback.answer("Оновлено!")
+
+    target_msg = callback.message if isinstance(callback.message, Message) else None
+    if target_msg:
+        chat_title = target_msg.chat.title or target_msg.chat.first_name or "Chat"
+        stats = await munito_service.get_chat_stats(target_chat_id)
+        text = format_ai_card(chat_title, target_chat_id, cfg, stats)
+        keyboard = build_ai_keyboard(target_chat_id, cfg, confirm_reset=confirm_reset)
+        try:
+            await target_msg.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        except Exception:
+            pass
+
+
 @dp.inline_query()
 async def inline_dice_handler(inline_query: InlineQuery):
     query = inline_query.query.strip()
@@ -662,7 +785,7 @@ async def inline_dice_handler(inline_query: InlineQuery):
                     ),
                 )
             )
-    else:
+    elif DiceParser.is_dice_query(query):
         cleaned_query, _ = DiceParser.normalize_input(query)
         try:
             res = DiceParser.parse_and_roll(cleaned_query)
@@ -690,6 +813,22 @@ async def inline_dice_handler(inline_query: InlineQuery):
                     ),
                 )
             )
+    else:
+        # Non-dice text (e.g. natural language prompts for AI assistant)
+        bot_user = await _get_cached_bot_user(inline_query.bot) if inline_query.bot else None
+        bot_tag = (
+            f"@{bot_user.username} " if (bot_user and getattr(bot_user, "username", None)) else ""
+        )
+        results.append(
+            InlineQueryResultArticle(
+                id=f"ai_{uuid.uuid4().hex[:8]}",
+                title=f"🤖 Запитати AI: {query[:45]}",
+                description=f"Надіслати '{query}' боту в чат",
+                input_message_content=InputTextMessageContent(
+                    message_text=f"{bot_tag}{query}",
+                ),
+            )
+        )
 
     await inline_query.answer(results=results, cache_time=1, is_personal=True)
 
@@ -1413,6 +1552,7 @@ async def _handle_ai_mention(message: Message, prompt: str, bot: Bot) -> None:
             prompt=prompt,
             context_text=context_text,
             image_bytes=image_bytes,
+            chat_id=message.chat.id,
         )
     except Exception as e:
         logger.exception("Munito AI generation failed")

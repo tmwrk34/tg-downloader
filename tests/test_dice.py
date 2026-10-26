@@ -352,10 +352,11 @@ async def test_inline_dice_handler_invalid_query():
 
     from bot import inline_dice_handler
 
+    # Attempting to roll with invalid dice syntax
     iq = InlineQuery(
         id="iq4",
         from_user=User(id=99999, is_bot=False, first_name="Adventurer", username="adv"),
-        query="not_a_die",
+        query="roll not_a_die",
         offset="",
     )
     with patch.object(InlineQuery, "answer", new_callable=AsyncMock) as mock_answer:
@@ -366,3 +367,29 @@ async def test_inline_dice_handler_invalid_query():
         assert len(results) == 1
         assert results[0].id == "err_invalid"
         assert "Invalid Dice Expression" in results[0].title
+
+
+@pytest.mark.asyncio
+async def test_inline_dice_handler_non_dice_prompt():
+    from unittest.mock import AsyncMock
+
+    from aiogram.types import InlineQuery
+
+    from bot import inline_dice_handler
+
+    # User typing a question or prompt, e.g. "це правда?"
+    iq = InlineQuery(
+        id="iq5",
+        from_user=User(id=99999, is_bot=False, first_name="Adventurer", username="adv"),
+        query="це правда?",
+        offset="",
+    )
+    with patch.object(InlineQuery, "answer", new_callable=AsyncMock) as mock_answer:
+        await inline_dice_handler(iq)
+        mock_answer.assert_awaited_once()
+        _, kwargs = mock_answer.call_args
+        results = kwargs.get("results")
+        assert len(results) == 1
+        assert results[0].id.startswith("ai_")
+        assert "Запитати AI" in results[0].title
+        assert "це правда?" in results[0].description
