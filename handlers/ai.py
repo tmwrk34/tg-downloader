@@ -7,7 +7,6 @@ from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, Message
 
-import bot
 from filters.admin import is_chat_admin
 from services.munito import (
     AVAILABLE_MODELS,
@@ -19,6 +18,7 @@ from services.munito import (
     split_telegram_message,
 )
 from services.worker import set_message_reaction
+from utils.proxy import bot_proxy as bot
 from utils.telegram_media import download_telegram_photo
 from utils.typing import keep_typing
 

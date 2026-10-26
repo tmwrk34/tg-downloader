@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from typing import Any
+
+# Ensure 'bot' points to this module in sys.modules even when executed directly as __main__
+if __name__ == "__main__":
+    sys.modules["bot"] = sys.modules[__name__]
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession

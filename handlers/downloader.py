@@ -23,11 +23,11 @@ from aiogram.types import (
     RichBlockCaption,
 )
 
-import bot
 from downloader import DownloadedMedia, MediaMetadata, YouTubeService
 from filters.media import MediaUrlFilter
 from services.cache import CachedMedia, get_canonical_cache_key
 from services.worker import chat_action_heartbeat, set_message_reaction
+from utils.proxy import bot_proxy as bot
 
 logger = logging.getLogger(__name__)
 
