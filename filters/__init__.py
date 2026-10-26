@@ -1,3 +1,4 @@
+from filters.admin import IsChatAdminFilter, is_chat_admin
 from filters.dice import DiceFilter
 from filters.media import MediaUrlFilter
 from filters.patterns import (
@@ -11,6 +12,7 @@ from filters.triggers import TriggerPhraseFilter
 
 __all__ = [
     "DiceFilter",
+    "IsChatAdminFilter",
     "MEDIA_PATTERNS",
     "MediaUrlFilter",
     "Platform",
@@ -18,4 +20,5 @@ __all__ = [
     "TriggerRegistry",
     "clean_url",
     "default_trigger_registry",
+    "is_chat_admin",
 ]

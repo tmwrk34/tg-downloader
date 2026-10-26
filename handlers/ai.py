@@ -1,0 +1,307 @@
+from __future__ import annotations
+
+import logging
+import re
+
+from aiogram import Bot, F, Router
+from aiogram.filters import Command, CommandObject
+from aiogram.types import CallbackQuery, Message
+
+import bot
+from filters.admin import is_chat_admin
+from services.munito import (
+    AVAILABLE_MODELS,
+    build_ai_keyboard,
+    format_ai_card,
+    get_next_model,
+    get_next_reasoning_effort,
+    markdown_to_telegram_html,
+    split_telegram_message,
+)
+from services.worker import set_message_reaction
+from utils.telegram_media import download_telegram_photo
+from utils.typing import keep_typing
+
+logger = logging.getLogger(__name__)
+
+ai_router = Router(name="ai")
+
+
+async def _extract_bot_tag_prompt(message: Message, active_bot: Bot) -> tuple[bool, str]:
+    """Check if message explicitly contains @bot_username tag and extract prompt."""
+    bot_user = await bot._get_cached_bot_user(active_bot)
+    if not bot_user:
+        return False, ""
+
+    username = getattr(bot_user, "username", None)
+    if not isinstance(username, str) or not username.strip():
+        return False, ""
+
+    raw_text = message.text or message.caption or ""
+    if not raw_text:
+        return False, ""
+
+    pattern = rf"@{re.escape(username)}\b"
+    if not re.search(pattern, raw_text, re.IGNORECASE):
+        return False, ""
+
+    cleaned_prompt = re.sub(pattern, "", raw_text, flags=re.IGNORECASE).strip()
+    return True, cleaned_prompt
+
+
+async def _handle_ai_mention(message: Message, prompt: str, active_bot: Bot) -> None:
+    """Handle explicit @bot_username tag using Munito AI with text or vision context."""
+    if not bot.munito_service.is_configured:
+        await message.reply(
+            "⚠️ Munito AI is not configured on the server (missing <code>MUNITO_API_KEY</code>).",
+            parse_mode="HTML",
+        )
+        return
+
+    context_text: str | None = None
+    image_bytes: bytes | None = None
+
+    # Check if this message is a reply to another message
+    if message.reply_to_message:
+        replied = message.reply_to_message
+        if replied.photo:
+            image_bytes = await download_telegram_photo(active_bot, replied.photo[-1])
+            if replied.caption:
+                context_text = replied.caption
+        elif replied.text:
+            context_text = replied.text
+    elif message.photo:
+        image_bytes = await download_telegram_photo(active_bot, message.photo[-1])
+
+    if not prompt and not context_text and not image_bytes:
+        await message.reply(
+            "Hello! I am connected to an AI model. Ask me a question or tag me in reply to a message or photo.",
+        )
+        return
+
+    chat_id = message.chat.id
+    image_mime = "image/jpeg" if image_bytes else None
+
+    try:
+        async with keep_typing(active_bot, chat_id, action="typing"):
+            reply_text = await bot.munito_service.generate_reply(
+                prompt=prompt,
+                context_text=context_text,
+                image_bytes=image_bytes,
+                image_mime=image_mime,
+                chat_id=chat_id,
+            )
+    except Exception as e:
+        logger.exception("Munito AI generation failed")
+        await message.reply(f"❌ AI Error: {e}")
+        return
+
+    raw_chunks = split_telegram_message(reply_text)
+    for idx, raw_chunk in enumerate(raw_chunks):
+        formatted_chunk = markdown_to_telegram_html(raw_chunk)
+        try:
+            if idx == 0:
+                await message.reply(formatted_chunk, parse_mode="HTML")
+            else:
+                await message.answer(formatted_chunk, parse_mode="HTML")
+        except Exception as e:
+            logger.warning("Failed to send formatted HTML chunk: %s, falling back to plain text", e)
+            if idx == 0:
+                await message.reply(raw_chunk)
+            else:
+                await message.answer(raw_chunk)
+
+
+@ai_router.message(Command("ai", "munito", "grok", "assistant", "асистент"))
+async def ai_command_handler(message: Message, command: CommandObject) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    chat_id = message.chat.id
+    chat_title = message.chat.title or message.chat.first_name or "Private Chat"
+
+    if not await is_chat_admin(message.bot, chat_id, user_id):
+        await message.reply("⚠️ Only chat administrators can configure the AI assistant.")
+        return
+
+    args = (command.args or "").strip().split()
+    cfg = await bot.munito_service.get_chat_config(chat_id)
+
+    if args:
+        subcmd = args[0].lower()
+        if subcmd in {"on", "start", "enable", "1", "увімк", "вкл"}:
+            cfg = await bot.munito_service.update_chat_config(chat_id, enabled=True)
+        elif subcmd in {"off", "stop", "disable", "0", "вимк", "викл"}:
+            cfg = await bot.munito_service.update_chat_config(chat_id, enabled=False)
+        elif subcmd in {"model", "модель"} and len(args) > 1:
+            req_model = args[1].strip()
+            matched = None
+            for m in AVAILABLE_MODELS:
+                if req_model.lower() == m.lower() or req_model.lower() == m.split("/")[-1].lower():
+                    matched = m
+                    break
+            if matched:
+                cfg = await bot.munito_service.update_chat_config(chat_id, model=matched)
+            else:
+                models_list = "\n".join(f"• <code>{m}</code>" for m in AVAILABLE_MODELS)
+                await message.reply(
+                    f"⚠️ Unknown model: <code>{req_model}</code>.\nAvailable models:\n{models_list}",
+                    parse_mode="HTML",
+                )
+                return
+        elif subcmd in {"models", "моделі"}:
+            models_list = "\n".join(f"• <code>{m}</code>" for m in AVAILABLE_MODELS)
+            await message.reply(
+                f"🧠 <b>Available Munito AI models:</b>\n{models_list}\n\n"
+                f"Current: <code>{cfg.model}</code>\n"
+                f"Change: <code>/ai model &lt;name&gt;</code> or use the inline buttons.",
+                parse_mode="HTML",
+            )
+            return
+        elif subcmd in {"effort", "thinking", "reasoning"} and len(args) > 1:
+            req_effort = args[1].lower()
+            if req_effort in {"low", "none", "medium", "high"}:
+                eff = "low" if req_effort == "none" else req_effort
+                cfg = await bot.munito_service.update_chat_config(chat_id, reasoning_effort=eff)
+            else:
+                await message.reply(
+                    "⚠️ Invalid thinking level. Choose one of: <code>low</code> (fast, ~15s), "
+                    "<code>medium</code> (balanced, ~35s), <code>high</code> (deep reasoning, ~90s).",
+                    parse_mode="HTML",
+                )
+                return
+        elif subcmd in {"reset", "скинути", "clear"}:
+            await bot.munito_service.reset_chat_stats(chat_id)
+            stats = await bot.munito_service.get_chat_stats(chat_id)
+            text = format_ai_card(chat_title, chat_id, cfg, stats)
+            keyboard = build_ai_keyboard(chat_id, cfg)
+            await message.reply(
+                "🧹 <b>Token usage statistics reset!</b>\n\n" + text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+            return
+
+    stats = await bot.munito_service.get_chat_stats(chat_id)
+    text = format_ai_card(chat_title, chat_id, cfg, stats)
+    keyboard = build_ai_keyboard(chat_id, cfg)
+    await message.reply(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@ai_router.callback_query(F.data.startswith("ai:"))
+async def ai_callback_handler(callback: CallbackQuery) -> None:
+    if not callback.data:
+        return
+
+    parts = callback.data.split(":")
+    if len(parts) < 3:
+        return
+
+    _, action, chat_id_str = parts[:3]
+    try:
+        target_chat_id = int(chat_id_str)
+    except ValueError:
+        return
+
+    user_id = callback.from_user.id if callback.from_user else 0
+    if not await is_chat_admin(callback.bot, target_chat_id, user_id):
+        await callback.answer(
+            "⚠️ Only chat administrators can modify AI settings.",
+            show_alert=True,
+        )
+        return
+
+    cfg = await bot.munito_service.get_chat_config(target_chat_id)
+    confirm_reset = False
+
+    if action == "toggle":
+        cfg = await bot.munito_service.update_chat_config(target_chat_id, enabled=not cfg.enabled)
+        await callback.answer(f"AI Assistant: {'Enabled' if cfg.enabled else 'Disabled'}")
+    elif action == "model":
+        next_m = get_next_model(cfg.model)
+        cfg = await bot.munito_service.update_chat_config(target_chat_id, model=next_m)
+        await callback.answer(f"Model: {next_m.split('/')[-1]}")
+    elif action == "effort":
+        next_eff = get_next_reasoning_effort(cfg.reasoning_effort)
+        cfg = await bot.munito_service.update_chat_config(target_chat_id, reasoning_effort=next_eff)
+        await callback.answer(f"Thinking: {next_eff.title()}")
+    elif action == "reset_prompt":
+        confirm_reset = True
+        await callback.answer()
+    elif action == "reset_confirm":
+        await bot.munito_service.reset_chat_stats(target_chat_id)
+        await callback.answer("Token statistics have been reset!", show_alert=True)
+    elif action == "refresh":
+        await callback.answer("Refreshed!")
+
+    target_msg = callback.message if isinstance(callback.message, Message) else None
+    if target_msg:
+        chat_title = target_msg.chat.title or target_msg.chat.first_name or "Chat"
+        stats = await bot.munito_service.get_chat_stats(target_chat_id)
+        text = format_ai_card(chat_title, target_chat_id, cfg, stats)
+        keyboard = build_ai_keyboard(target_chat_id, cfg, confirm_reset=confirm_reset)
+        try:
+            await target_msg.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+        except Exception:
+            pass
+
+
+@ai_router.message(F.text | F.caption)
+async def chatter_message_listener(message: Message, active_bot: Bot | None = None) -> None:
+    """
+    Message listener for group conversation:
+    1. If explicitly tagged with @bot_username, routes to Munito AI assistant.
+    2. Otherwise, passes through to passive Markov chatterbot engine.
+    """
+    raw_text = message.text or message.caption or ""
+    if not raw_text or raw_text.startswith("/"):
+        return
+
+    current_bot = active_bot or message.bot
+
+    # 1. Explicit mention check for Munito AI assistant
+    if current_bot:
+        is_tag, prompt = await _extract_bot_tag_prompt(message, current_bot)
+        if is_tag:
+            await _handle_ai_mention(message, prompt, current_bot)
+            return
+
+    # 2. Only text messages without @bot tag participate in Markov chatterbot
+    if not message.text:
+        return
+
+    # Passive vocabulary learning
+    await bot.chatter_service.train(message.chat.id, message.text)
+
+    cfg = await bot.chatter_service.get_config(message.chat.id)
+    if not cfg.enabled:
+        return
+
+    # Random emoji reactions
+    if bot.chatter_service.should_react(cfg):
+        reaction_emoji = bot.chatter_service.pick_reaction()
+        await set_message_reaction(message, reaction_emoji)
+
+    # Check chatterbot keywords or reply to the bot without tag
+    bot_user = await bot._get_cached_bot_user(current_bot) if current_bot else None
+    text_lower = message.text.lower()
+
+    is_chatter_keyword = bool("бард" in text_lower or "дурачок" in text_lower)
+    is_reply_to_bot = bool(
+        message.reply_to_message
+        and message.reply_to_message.from_user
+        and bot_user
+        and message.reply_to_message.from_user.id == bot_user.id
+    )
+
+    if bot.chatter_service.should_reply(
+        cfg, is_mention_or_reply=(is_chatter_keyword or is_reply_to_bot)
+    ):
+        reply_sentence = await bot.chatter_service.generate(message.chat.id, seed_text=message.text)
+        if reply_sentence:
+            await bot.chatter_service.record_reply(message.chat.id)
+            await message.reply(reply_sentence)
+        elif is_chatter_keyword or is_reply_to_bot:
+            await message.reply(
+                "<i>*Blinks confusedly...*</i>\n"
+                "(My vocabulary in this tavern is still empty! Talk more so I can learn to speak.)",
+                parse_mode="HTML",
+            )
