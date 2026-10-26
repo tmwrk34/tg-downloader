@@ -20,7 +20,7 @@ from services.munito import (
 from services.worker import set_message_reaction
 from utils.proxy import bot_proxy as bot
 from utils.responses import safe_reply
-from utils.telegram_media import download_telegram_photo
+from utils.telegram_media import download_telegram_photo, select_optimal_photo
 from utils.typing import keep_typing
 
 logger = logging.getLogger(__name__)
@@ -67,13 +67,15 @@ async def _handle_ai_mention(message: Message, prompt: str, active_bot: Bot) -> 
     if message.reply_to_message:
         replied = message.reply_to_message
         if replied.photo:
-            image_bytes = await download_telegram_photo(active_bot, replied.photo[-1])
+            optimal_photo = select_optimal_photo(replied.photo)
+            image_bytes = await download_telegram_photo(active_bot, optimal_photo)
             if replied.caption:
                 context_text = replied.caption
         elif replied.text:
             context_text = replied.text
     elif message.photo:
-        image_bytes = await download_telegram_photo(active_bot, message.photo[-1])
+        optimal_photo = select_optimal_photo(message.photo)
+        image_bytes = await download_telegram_photo(active_bot, optimal_photo)
 
     if not prompt and not context_text and not image_bytes:
         await safe_reply(
@@ -96,7 +98,12 @@ async def _handle_ai_mention(message: Message, prompt: str, active_bot: Bot) -> 
             )
     except Exception as e:
         logger.exception("Munito AI generation failed")
-        await safe_reply(message, f"❌ AI Error: {e}")
+        err_msg = (
+            str(e).strip()
+            if str(e).strip()
+            else f"{type(e).__name__} (request timed out or failed)"
+        )
+        await safe_reply(message, f"❌ AI Error: {err_msg}")
         return
 
     raw_chunks = split_telegram_message(reply_text)

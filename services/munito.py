@@ -300,7 +300,7 @@ class MunitoAIService:
         model: str = DEFAULT_MODEL,
         base_url: str = "https://api.munito.ai/inference/v1",
         system_prompt: str | None = None,
-        timeout_seconds: float = 120.0,
+        timeout_seconds: float = 180.0,
         db_path: str | Path | None = None,
     ) -> None:
         self.api_key = api_key
@@ -591,8 +591,23 @@ class MunitoAIService:
         }
 
         url = f"{self.base_url}/chat/completions"
-        timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
+        timeout = aiohttp.ClientTimeout(
+            total=self.timeout_seconds,
+            connect=30.0,
+            sock_read=self.timeout_seconds,
+        )
         start_time = asyncio.get_event_loop().time()
+        vision_info = f"yes ({len(image_bytes) // 1024}KB)" if image_bytes else "no"
+        reasoning_info = payload.get("reasoning_effort", "n/a")
+
+        logger.info(
+            "Munito AI request started (chat_id=%s, model=%s, reasoning_effort=%s, vision=%s, max_tokens=%s)",
+            chat_id,
+            target_model,
+            reasoning_info,
+            vision_info,
+            payload.get("max_tokens"),
+        )
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
             try:
@@ -617,7 +632,37 @@ class MunitoAIService:
 
                     data = await resp.json()
                     elapsed = asyncio.get_event_loop().time() - start_time
-                    logger.info("Munito AI responded in %.2fs (chat_id=%s)", elapsed, chat_id)
+                    usage = data.get("usage") or {}
+                    p_tok = int(usage.get("prompt_tokens") or 0)
+                    c_tok = int(usage.get("completion_tokens") or 0)
+                    t_tok = int(usage.get("total_tokens") or (p_tok + c_tok))
+
+                    logger.info(
+                        "Munito AI responded in %.2fs (chat_id=%s, model=%s, reasoning_effort=%s, vision=%s, tokens: total=%d [prompt=%d, completion=%d])",
+                        elapsed,
+                        chat_id,
+                        target_model,
+                        reasoning_info,
+                        vision_info,
+                        t_tok,
+                        p_tok,
+                        c_tok,
+                    )
+            except TimeoutError as err:
+                elapsed = asyncio.get_event_loop().time() - start_time
+                logger.error(
+                    "Munito AI request timed out after %.2fs (chat_id=%s, model=%s, reasoning_effort=%s, vision=%s)",
+                    elapsed,
+                    chat_id,
+                    target_model,
+                    reasoning_info,
+                    vision_info,
+                )
+                raise RuntimeError(
+                    f"Munito AI request timed out after {int(elapsed)}s. "
+                    "The model is taking too long to think or process the image. "
+                    "Try lowering thinking effort (/ai effort low) or switching model (/ai)."
+                ) from err
             except aiohttp.ClientError as err:
                 logger.error("Munito AI network connection error: %s", err)
                 raise RuntimeError(f"Failed to connect to Munito AI: {err}") from err
