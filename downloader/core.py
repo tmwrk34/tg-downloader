@@ -57,6 +57,39 @@ def clean_artist_tag(
     return None
 
 
+def sanitize_filename(name: str, max_bytes: int = 180) -> str:
+    """
+    Sanitize filename for filesystem compatibility and truncate so that
+    its UTF-8 encoded length strictly stays within max_bytes (preserving extension).
+    Prevents OSError [Errno 36] File name too long on Linux filesystems (NAME_MAX=255).
+    """
+    clean_name = re.sub(r'[\\/*?:"<>|\x00-\x1f]', "", name).strip()
+    clean_name = re.sub(r"\s+", " ", clean_name)
+    clean_name = clean_name.rstrip(". ")
+    if not clean_name:
+        return "audio"
+
+    path = Path(clean_name)
+    suffix = path.suffix.lower()
+    stem = path.stem or "audio"
+
+    suffix_bytes = suffix.encode("utf-8")
+    if len(suffix_bytes) >= max_bytes:
+        suffix = suffix[:10]
+        suffix_bytes = suffix.encode("utf-8")
+
+    max_stem_bytes = max(10, max_bytes - len(suffix_bytes))
+    stem_bytes = stem.encode("utf-8")
+
+    if len(stem_bytes) > max_stem_bytes:
+        truncated_stem = stem_bytes[:max_stem_bytes].decode("utf-8", errors="ignore").rstrip(". ")
+        if not truncated_stem:
+            truncated_stem = "audio"
+        return f"{truncated_stem}{suffix}"
+
+    return f"{stem}{suffix}"
+
+
 class MediaDownloaderCore:
     """Core asynchronous media downloader using yt-dlp."""
 
@@ -309,14 +342,14 @@ class MediaDownloaderCore:
                     new_filename = f"{clean_artist} - {clean_title_part}{file_path.suffix.lower()}"
                 else:
                     new_filename = f"{clean_title_part}{file_path.suffix.lower()}"
-                safe_name = re.sub(r'[\\/*?:"<>|]', "", new_filename)
+                safe_name = sanitize_filename(new_filename, max_bytes=180)
                 renamed_path = temp_dir / safe_name
-                if renamed_path != file_path and not renamed_path.exists():
-                    try:
+                try:
+                    if renamed_path != file_path and not renamed_path.exists():
                         file_path.rename(renamed_path)
                         file_path = renamed_path
-                    except OSError:
-                        pass
+                except OSError as rename_err:
+                    logger.warning("Could not rename audio file to '%s': %s", safe_name, rename_err)
 
             # Discover downloaded thumbnail cover art if present (.jpg, .jpeg, .png)
             thumbnail_path: Path | None = None

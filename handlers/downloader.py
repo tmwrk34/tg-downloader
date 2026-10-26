@@ -28,6 +28,13 @@ from filters.media import MediaUrlFilter
 from services.cache import CachedMedia, get_canonical_cache_key
 from services.worker import chat_action_heartbeat, set_message_reaction
 from utils.proxy import bot_proxy as bot
+from utils.responses import (
+    safe_reply,
+    safe_reply_audio,
+    safe_reply_media_group,
+    safe_reply_photo,
+    safe_reply_video,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +88,8 @@ async def send_cached_media(message: Message, cached: CachedMedia) -> bool:
     if cached.media_type == "video":
         if not cached.file_id:
             return False
-        await message.reply_video(
+        await safe_reply_video(
+            message,
             video=cached.file_id,
             caption=cached.caption,
             duration=int(cached.extra_data.get("duration", 0)),
@@ -94,7 +102,8 @@ async def send_cached_media(message: Message, cached: CachedMedia) -> bool:
     elif cached.media_type == "photo":
         if not cached.file_id:
             return False
-        await message.reply_photo(
+        await safe_reply_photo(
+            message,
             photo=cached.file_id,
             caption=cached.caption,
         )
@@ -103,7 +112,8 @@ async def send_cached_media(message: Message, cached: CachedMedia) -> bool:
     elif cached.media_type == "audio":
         if not cached.file_id:
             return False
-        await message.reply_audio(
+        await safe_reply_audio(
+            message,
             audio=cached.file_id,
             title=cached.extra_data.get("title"),
             performer=cached.extra_data.get("performer"),
@@ -119,13 +129,15 @@ async def send_cached_media(message: Message, cached: CachedMedia) -> bool:
         if len(items) == 1:
             it = items[0]
             if it["type"] == "video":
-                await message.reply_video(
+                await safe_reply_video(
+                    message,
                     video=it["file_id"],
                     caption=cached.caption,
                     supports_streaming=True,
                 )
             else:
-                await message.reply_photo(
+                await safe_reply_photo(
+                    message,
                     photo=it["file_id"],
                     caption=cached.caption,
                 )
@@ -140,11 +152,12 @@ async def send_cached_media(message: Message, cached: CachedMedia) -> bool:
                         media_group.append(InputMediaVideo(media=it["file_id"], caption=c))
                     else:
                         media_group.append(InputMediaPhoto(media=it["file_id"], caption=c))
-                await message.reply_media_group(media=media_group)
+                await safe_reply_media_group(message, media=media_group)
 
         audio_file_id = cached.extra_data.get("audio_file_id")
         if audio_file_id:
-            await message.reply_audio(
+            await safe_reply_audio(
+                message,
                 audio=audio_file_id,
                 title=cached.extra_data.get("audio_title"),
                 performer=cached.extra_data.get("audio_performer", "Unknown Artist"),
@@ -183,14 +196,14 @@ async def send_downloaded_media(
             file_input = FSInputFile(path)
             caption = f"🎬 {downloaded.title}" if downloaded.title else ""
             if m_type == "video":
-                sent_msg = await message.reply_video(
-                    video=file_input, caption=caption, supports_streaming=True
+                sent_msg = await safe_reply_video(
+                    message, video=file_input, caption=caption, supports_streaming=True
                 )
                 vid = getattr(sent_msg, "video", None)
                 if vid and getattr(vid, "file_id", None):
                     album_items.append({"type": "video", "file_id": vid.file_id})
             else:
-                sent_msg = await message.reply_photo(photo=file_input, caption=caption)
+                sent_msg = await safe_reply_photo(message, photo=file_input, caption=caption)
                 photos = getattr(sent_msg, "photo", None)
                 if photos and len(photos) > 0:
                     album_items.append({"type": "photo", "file_id": photos[-1].file_id})
@@ -238,7 +251,7 @@ async def send_downloaded_media(
                             media_group.append(
                                 InputMediaPhoto(media=file_input, caption=item_caption)
                             )
-                    sent_msgs = await message.reply_media_group(media=media_group)
+                    sent_msgs = await safe_reply_media_group(message, media=media_group)
                     if sent_msgs and isinstance(sent_msgs, list):
                         for sm in sent_msgs:
                             vid = getattr(sm, "video", None)
@@ -251,7 +264,8 @@ async def send_downloaded_media(
         audio_file_id = None
         if downloaded.extra_audio_path and downloaded.extra_audio_path.exists():
             audio_input = FSInputFile(downloaded.extra_audio_path)
-            sent_audio = await message.reply_audio(
+            sent_audio = await safe_reply_audio(
+                message,
                 audio=audio_input,
                 title=downloaded.track or downloaded.title,
                 performer=downloaded.artist or "Unknown Artist",
@@ -288,7 +302,8 @@ async def send_downloaded_media(
             if downloaded.thumbnail_path and downloaded.thumbnail_path.exists()
             else None
         )
-        sent_audio = await message.reply_audio(
+        sent_audio = await safe_reply_audio(
+            message,
             audio=file_input,
             title=downloaded.track or downloaded.title,
             performer=downloaded.artist or "Unknown Artist",
@@ -312,7 +327,7 @@ async def send_downloaded_media(
             except Exception as e:
                 logger.warning("Failed to cache audio for %s: %s", cache_key, e)
     elif ext in {".jpg", ".jpeg", ".png", ".webp"}:
-        sent_photo = await message.reply_photo(photo=file_input, caption=caption)
+        sent_photo = await safe_reply_photo(message, photo=file_input, caption=caption)
         photos = getattr(sent_photo, "photo", None)
         if cache_key and photos and len(photos) > 0:
             try:
@@ -326,7 +341,8 @@ async def send_downloaded_media(
             except Exception as e:
                 logger.warning("Failed to cache photo for %s: %s", cache_key, e)
     else:
-        sent_video = await message.reply_video(
+        sent_video = await safe_reply_video(
+            message,
             video=file_input,
             caption=caption,
             duration=int(round(downloaded.duration)) if downloaded.duration else 0,
@@ -362,7 +378,7 @@ async def media_url_handler(message: Message, url: str, platform: str) -> None:
         platform
     ) or bot.platform_registry.get_service_for_url(url)
     if not service:
-        await message.reply("Unsupported platform.")
+        await safe_reply(message, "Unsupported platform.")
         return
 
     # Check cache for immediate delivery (TikTok, Instagram, YouTube Shorts, etc.)
@@ -395,7 +411,7 @@ async def media_url_handler(message: Message, url: str, platform: str) -> None:
     if is_yt_long:
         video_id = YouTubeService.extract_video_id(url)
         if video_id:
-            status_msg = await message.reply("Fetching YouTube media information... ⏳")
+            status_msg = await safe_reply(message, "Fetching YouTube media information... ⏳")
             try:
                 cached_meta = _youtube_metadata_cache.get(video_id)
                 if cached_meta and (time.monotonic() - cached_meta[0]) < METADATA_CACHE_TTL_SECONDS:
@@ -495,7 +511,7 @@ async def media_url_handler(message: Message, url: str, platform: str) -> None:
             if bot.worker_limiter.is_download_busy
             else f"Downloading {label} media... Please wait ⏳"
         )
-        status_msg = await message.reply(initial_text)
+        status_msg = await safe_reply(message, initial_text)
         was_queued = False
 
         async def _on_queued(pos: int) -> None:

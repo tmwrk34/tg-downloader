@@ -18,6 +18,7 @@ from aiogram.types import (
 from filters.dice import DiceFilter
 from services.dice import DiceParser, get_secret_roll, store_secret_roll
 from utils.proxy import bot_proxy as bot
+from utils.responses import safe_reply
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +31,9 @@ async def roll_command_handler(message: Message, command: CommandObject) -> None
     user_name = message.from_user.first_name if message.from_user else "Player"
     try:
         res = DiceParser.parse_and_roll(expr)
-        await message.reply(res.format_html(user_name), parse_mode="HTML")
+        await safe_reply(message, res.format_html(user_name), parse_mode="HTML")
     except ValueError as err:
-        await message.reply(f"⚠️ <b>Invalid roll syntax:</b> {err}", parse_mode="HTML")
+        await safe_reply(message, f"⚠️ <b>Invalid roll syntax:</b> {err}", parse_mode="HTML")
 
 
 @dice_router.message(Command("dmroll", "дмролл", "дм", "секретролл"))
@@ -44,11 +45,11 @@ async def dmroll_command_handler(message: Message, command: CommandObject) -> No
     try:
         res = DiceParser.parse_and_roll(expr)
     except ValueError as err:
-        await message.reply(f"⚠️ <b>Invalid roll syntax:</b> {err}", parse_mode="HTML")
+        await safe_reply(message, f"⚠️ <b>Invalid roll syntax:</b> {err}", parse_mode="HTML")
         return
 
     if message.chat.type == "private":
-        await message.reply(res.format_html(user_name), parse_mode="HTML")
+        await safe_reply(message, res.format_html(user_name), parse_mode="HTML")
         return
 
     secret_id = store_secret_roll(
@@ -67,7 +68,8 @@ async def dmroll_command_handler(message: Message, command: CommandObject) -> No
             ]
         ]
     )
-    await message.reply(
+    await safe_reply(
+        message,
         f"🎲 <b>Secret Roll made by {user_name}</b>\n<i>Only {user_name} can view this result.</i>",
         reply_markup=keyboard,
         parse_mode="HTML",
@@ -86,7 +88,7 @@ async def natural_dice_handler(message: Message, dice_expr: str, is_secret: bool
 
     if is_secret:
         if message.chat.type == "private":
-            await message.reply(res.format_html(user_name), parse_mode="HTML")
+            await safe_reply(message, res.format_html(user_name), parse_mode="HTML")
             return
 
         secret_id = store_secret_roll(
@@ -105,13 +107,14 @@ async def natural_dice_handler(message: Message, dice_expr: str, is_secret: bool
                 ]
             ]
         )
-        await message.reply(
+        await safe_reply(
+            message,
             f"🎲 <b>Secret Roll made by {user_name}</b>\n<i>Only {user_name} can view this result.</i>",
             reply_markup=keyboard,
             parse_mode="HTML",
         )
     else:
-        await message.reply(res.format_html(user_name), parse_mode="HTML")
+        await safe_reply(message, res.format_html(user_name), parse_mode="HTML")
 
 
 @dice_router.callback_query(F.data.startswith("secret_roll:"))

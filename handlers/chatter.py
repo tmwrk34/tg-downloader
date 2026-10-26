@@ -15,6 +15,7 @@ from aiogram.types import (
 from filters.admin import is_chat_admin
 from services.chatter import ChatterConfig, ChatterStats
 from utils.proxy import bot_proxy as bot
+from utils.responses import safe_reply
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,9 @@ async def chatter_command_handler(message: Message, command: CommandObject) -> N
     chat_title = message.chat.title or message.chat.first_name or "Private Chat"
 
     if not await is_chat_admin(message.bot, chat_id, user_id):
-        await message.reply("⚠️ Only chat administrators can configure tavern chatter settings.")
+        await safe_reply(
+            message, "⚠️ Only chat administrators can configure tavern chatter settings."
+        )
         return
 
     args = (command.args or "").strip().split()
@@ -153,7 +156,8 @@ async def chatter_command_handler(message: Message, command: CommandObject) -> N
                     raise ValueError
                 cfg = await bot.chatter_service.update_config(chat_id, reply_chance=pct / 100.0)
             except ValueError:
-                await message.reply(
+                await safe_reply(
+                    message,
                     "⚠️ Please provide a valid percentage between 0 and 100 (e.g. <code>/chatter chance 15</code>).",
                     parse_mode="HTML",
                 )
@@ -165,7 +169,8 @@ async def chatter_command_handler(message: Message, command: CommandObject) -> N
                     raise ValueError
                 cfg = await bot.chatter_service.update_config(chat_id, reaction_chance=pct / 100.0)
             except ValueError:
-                await message.reply(
+                await safe_reply(
+                    message,
                     "⚠️ Please provide a valid percentage between 0 and 100 (e.g. <code>/chatter react 10</code>).",
                     parse_mode="HTML",
                 )
@@ -177,7 +182,8 @@ async def chatter_command_handler(message: Message, command: CommandObject) -> N
                     raise ValueError
                 cfg = await bot.chatter_service.update_config(chat_id, cooldown_seconds=cd)
             except ValueError:
-                await message.reply(
+                await safe_reply(
+                    message,
                     "⚠️ Please provide a valid cooldown in seconds (e.g. <code>/chatter cooldown 30</code>).",
                     parse_mode="HTML",
                 )
@@ -191,13 +197,13 @@ async def chatter_command_handler(message: Message, command: CommandObject) -> N
             cfg = await bot.chatter_service.update_config(chat_id, learning_enabled=val)
         elif subcmd in {"clear", "reset"}:
             cleared = await bot.chatter_service.clear_vocabulary(chat_id)
-            await message.reply(f"🧹 Cleared {cleared:,} words from this chat's vocabulary!")
+            await safe_reply(message, f"🧹 Cleared {cleared:,} words from this chat's vocabulary!")
             return
 
     stats = await bot.chatter_service.get_stats(chat_id)
     text = format_chatter_card(chat_title, chat_id, cfg, stats)
     keyboard = build_chatter_keyboard(chat_id, cfg)
-    await message.reply(text, reply_markup=keyboard, parse_mode="HTML")
+    await safe_reply(message, text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @chatter_router.callback_query(F.data.startswith("chatter:"))

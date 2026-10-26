@@ -9,6 +9,7 @@ from aiogram.types import (
 )
 
 from filters.triggers import TriggerPhraseFilter
+from utils.responses import safe_reply
 
 base_router = Router(name="base")
 
@@ -87,9 +88,11 @@ async def help_command_handler(message: Message) -> None:
             ]
         ]
     )
-    await message.reply(HELP_MANUAL_HTML, reply_markup=keyboard, parse_mode="HTML")
+    await safe_reply(message, HELP_MANUAL_HTML, reply_markup=keyboard, parse_mode="HTML")
 
 
 @base_router.message(TriggerPhraseFilter(category="ping", exact_match=True))
 async def ping_handler(message: Message, matched_phrase: str = "") -> None:
-    await message.reply("Pong! 🏓 Alive, well, and comfortably running inside a Raspberry Pi.")
+    await safe_reply(
+        message, "Pong! 🏓 Alive, well, and comfortably running inside a Raspberry Pi."
+    )

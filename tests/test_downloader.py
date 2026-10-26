@@ -14,7 +14,7 @@ from downloader import (
     TikTokService,
     YouTubeService,
 )
-from downloader.core import clean_artist_tag
+from downloader.core import clean_artist_tag, sanitize_filename
 from downloader.platforms.tiktok import resolve_tiktok_url
 
 
@@ -293,6 +293,23 @@ def test_clean_artist_tag():
     assert clean_artist_tag(None, None, "The Prodigy - Topic") == "The Prodigy"
     assert clean_artist_tag(None, None, "Normal Uploader") == "Normal Uploader"
     assert clean_artist_tag(None, None, None) is None
+
+
+def test_sanitize_filename_standard():
+    assert sanitize_filename("Artist - Track.mp3") == "Artist - Track.mp3"
+    assert sanitize_filename('Invalid: / * ? < > " | Name.mp4') == "Invalid Name.mp4"
+    assert sanitize_filename("") == "audio"
+
+
+def test_sanitize_filename_too_long_cyrillic():
+    long_name = (
+        "Друга Ріка, Харчишин Валерій Володимирович, Барановський Олександр Ігорович, "
+        "Біліченко Сергій Олександрович, Дорошенко Олексій, Скуратовський Віктор Васильович - Там де ти.mp3"
+    )
+    sanitized = sanitize_filename(long_name, max_bytes=180)
+    assert sanitized.endswith(".mp3")
+    assert len(sanitized.encode("utf-8")) <= 180
+    assert "Друга Ріка" in sanitized
 
 
 def test_youtube_extract_video_id():
