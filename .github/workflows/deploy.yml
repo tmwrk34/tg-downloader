@@ -41,6 +41,9 @@ jobs:
           TELEGRAM_API_ID: ${{ vars.TELEGRAM_API_ID || secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ vars.TELEGRAM_API_HASH || secrets.TELEGRAM_API_HASH }}
           LOCAL_BOT_API_URL: ${{ vars.LOCAL_BOT_API_URL || secrets.LOCAL_BOT_API_URL }}
+          MUNITO_API_KEY: ${{ secrets.MUNITO_API_KEY || vars.MUNITO_API_KEY }}
+          MUNITO_MODEL: ${{ vars.MUNITO_MODEL || secrets.MUNITO_MODEL }}
+          MUNITO_BASE_URL: ${{ vars.MUNITO_BASE_URL || secrets.MUNITO_BASE_URL }}
         run: |
           cat << EOF > .env
           BOT_TOKEN=${BOT_TOKEN}
@@ -48,6 +51,9 @@ jobs:
           TELEGRAM_API_ID=${TELEGRAM_API_ID}
           TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
           LOCAL_BOT_API_URL=${LOCAL_BOT_API_URL}
+          MUNITO_API_KEY=${MUNITO_API_KEY}
+          MUNITO_MODEL=${MUNITO_MODEL}
+          MUNITO_BASE_URL=${MUNITO_BASE_URL}
           EOF
           chmod 600 .env
 
