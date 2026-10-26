@@ -7,6 +7,7 @@ from aiogram.filters import CommandObject
 from aiogram.types import CallbackQuery, Chat, Message, User
 
 from services.munito import (
+    AI_TOOLS,
     AVAILABLE_MODELS,
     DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
@@ -95,12 +96,27 @@ def test_munito_is_configured():
     assert svc_valid.is_configured
 
 
-def test_default_system_prompt_language_rule():
+def test_default_system_prompt_identity_and_language():
     assert "Ukrainian by default" not in DEFAULT_SYSTEM_PROMPT
+    assert "Bard" in DEFAULT_SYSTEM_PROMPT
+    assert "@bard_taverna_bot" in DEFAULT_SYSTEM_PROMPT
+    assert "Media Downloader" in DEFAULT_SYSTEM_PROMPT
+    assert "Tabletop Dice Roller" in DEFAULT_SYSTEM_PROMPT
+    assert "roll_dice" in DEFAULT_SYSTEM_PROMPT
     assert "Always respond in the exact same language" in DEFAULT_SYSTEM_PROMPT
     assert "Russian" in DEFAULT_SYSTEM_PROMPT
     assert "Ukrainian" in DEFAULT_SYSTEM_PROMPT
     assert "English" in DEFAULT_SYSTEM_PROMPT
+
+
+def test_ai_tools_definition():
+    assert len(AI_TOOLS) >= 1
+    roll_tool = next((t for t in AI_TOOLS if t["function"]["name"] == "roll_dice"), None)
+    assert roll_tool is not None
+    assert roll_tool["type"] == "function"
+    params = roll_tool["function"]["parameters"]
+    assert "expression" in params["properties"]
+    assert "expression" in params["required"]
 
 
 @pytest.mark.asyncio
@@ -1010,5 +1026,151 @@ async def test_ai_callback_context_and_mode(tmp_path: Path):
 
         await ai_callback_handler(cb_clear)
         assert await svc.get_history_count(chat_id) == 0
+
+    svc.close()
+
+
+@pytest.mark.asyncio
+async def test_munito_tool_calling_roll_dice(tmp_path: Path):
+    db_file = tmp_path / "test_tool_dice.db"
+    svc = MunitoAIService(api_key="test_key", db_path=db_file)
+    chat_id = 112233
+
+    # Turn 1: Model requests roll_dice
+    mock_resp1 = AsyncMock()
+    mock_resp1.status = 200
+    mock_resp1.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_dice_1",
+                            "type": "function",
+                            "function": {
+                                "name": "roll_dice",
+                                "arguments": '{"expression": "2d6+3", "reason": "damage"}',
+                            },
+                        }
+                    ],
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 15, "completion_tokens": 10, "total_tokens": 25},
+    }
+    mock_resp1.__aenter__.return_value = mock_resp1
+
+    # Turn 2: Model receives tool result and provides final narrative
+    mock_resp2 = AsyncMock()
+    mock_resp2.status = 200
+    mock_resp2.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "🎲 Кидаю 2d6+3 на шкоду... Результат: 11! Могутній удар мечем вражає ціль.",
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 30, "completion_tokens": 20, "total_tokens": 50},
+    }
+    mock_resp2.__aenter__.return_value = mock_resp2
+
+    mock_session = AsyncMock()
+    mock_session.post = MagicMock(side_effect=[mock_resp1, mock_resp2])
+    mock_session.__aenter__.return_value = mock_session
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        reply = await svc.generate_reply(
+            prompt="Кинь кубик 2d6+3 на шкоду",
+            chat_id=chat_id,
+        )
+        assert "🎲 Кидаю 2d6+3 на шкоду" in reply
+        assert mock_session.post.call_count == 2
+
+        # Check second call payload messages
+        second_call_args = mock_session.post.call_args_list[1]
+        _, second_kwargs = second_call_args
+        sent_messages = second_kwargs["json"]["messages"]
+
+        # Expected messages: [system, user, assistant(tool_calls), tool(result)]
+        assert len(sent_messages) == 4
+        assert sent_messages[2]["role"] == "assistant"
+        assert sent_messages[2]["tool_calls"][0]["function"]["name"] == "roll_dice"
+        assert sent_messages[3]["role"] == "tool"
+        assert sent_messages[3]["tool_call_id"] == "call_dice_1"
+        assert '"expression": "2d6+3"' in sent_messages[3]["content"]
+
+        # Check total token usage accumulated (25 + 50 = 75)
+        stats = await svc.get_chat_stats(chat_id)
+        assert stats.request_count == 1
+        assert stats.prompt_tokens == 45
+        assert stats.completion_tokens == 30
+        assert stats.total_tokens == 75
+
+    svc.close()
+
+
+@pytest.mark.asyncio
+async def test_munito_tool_calling_invalid_expression(tmp_path: Path):
+    db_file = tmp_path / "test_tool_err.db"
+    svc = MunitoAIService(api_key="test_key", db_path=db_file)
+
+    mock_resp1 = AsyncMock()
+    mock_resp1.status = 200
+    mock_resp1.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_bad",
+                            "type": "function",
+                            "function": {
+                                "name": "roll_dice",
+                                "arguments": '{"expression": "not_a_valid_dice"}',
+                            },
+                        }
+                    ],
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+    mock_resp1.__aenter__.return_value = mock_resp1
+
+    mock_resp2 = AsyncMock()
+    mock_resp2.status = 200
+    mock_resp2.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Не можу розпізнати такий кубик, спробуй наприклад 1d20 або 2d6.",
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+    }
+    mock_resp2.__aenter__.return_value = mock_resp2
+
+    mock_session = AsyncMock()
+    mock_session.post = MagicMock(side_effect=[mock_resp1, mock_resp2])
+    mock_session.__aenter__.return_value = mock_session
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        reply = await svc.generate_reply("рольни щось дивне")
+        assert "Не можу розпізнати" in reply
+
+        # Tool message contains error message rather than raising unhandled exception
+        second_call = mock_session.post.call_args_list[1]
+        sent_messages = second_call[1]["json"]["messages"]
+        tool_msg = sent_messages[-1]
+        assert tool_msg["role"] == "tool"
+        assert "error" in tool_msg["content"]
 
     svc.close()
