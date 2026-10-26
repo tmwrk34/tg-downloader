@@ -15,6 +15,7 @@ from services.munito import (
     build_ai_keyboard,
     format_ai_card,
     get_next_model,
+    markdown_to_telegram_html,
     split_telegram_message,
 )
 
@@ -41,6 +42,43 @@ def test_split_telegram_message():
     chunks_line = split_telegram_message(long_line, max_chars=100)
     assert len(chunks_line) > 1
     assert "".join(chunks_line).replace(" ", "") == long_line.replace(" ", "")
+
+
+def test_markdown_to_telegram_html():
+    # Empty
+    assert markdown_to_telegram_html("") == ""
+
+    # Bold and Italic
+    md = "**bold text** and *italic text* and __other bold__ and _other italic_"
+    expected = (
+        "<b>bold text</b> and <i>italic text</i> and <b>other bold</b> and <i>other italic</i>"
+    )
+    assert markdown_to_telegram_html(md) == expected
+
+    # Headers and Bullets
+    md_list = "### Header Title\n- Item 1\n* Item 2"
+    html_list = markdown_to_telegram_html(md_list)
+    assert "<b>Header Title</b>" in html_list
+    assert "• Item 1" in html_list
+    assert "• Item 2" in html_list
+
+    # Inline code and HTML escaping
+    md_code = "Use `<tag>` & `x > y` in `script.py`"
+    html_code = markdown_to_telegram_html(md_code)
+    assert "<code>&lt;tag&gt;</code>" in html_code
+    assert "&amp;" in html_code
+    assert "<code>x &gt; y</code>" in html_code
+
+    # Code blocks
+    md_block = "```python\nprint('<hello>')\n```"
+    html_block = markdown_to_telegram_html(md_block)
+    assert (
+        "<pre><code class=\"language-python\">print('&lt;hello&gt;')\n</code></pre>" in html_block
+    )
+
+    # Links
+    md_link = "[Munito AI](https://munito.ai)"
+    assert markdown_to_telegram_html(md_link) == '<a href="https://munito.ai">Munito AI</a>'
 
 
 def test_munito_is_configured():
@@ -512,7 +550,25 @@ async def test_munito_command_and_callback_handlers(tmp_path: Path):
             assert "Available Munito AI models" in models_text
             assert "deepseek-ai/deepseek-v4.1-flash-1017" in models_text
 
-        # 6. /ai reset
+        # 6. /ai effort
+        with patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply:
+            await ai_command_handler(
+                msg, CommandObject(prefix="/", command="ai", args="effort none")
+            )
+            assert mock_reply.call_count == 1
+            assert "Thinking:" in mock_reply.call_args[0][0]
+            assert "None (Instant" in mock_reply.call_args[0][0]
+            cfg = await test_svc.get_chat_config(chat_id)
+            assert cfg.reasoning_effort == "none"
+
+        with patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply:
+            await ai_command_handler(
+                msg, CommandObject(prefix="/", command="ai", args="effort invalid_val")
+            )
+            assert mock_reply.call_count == 1
+            assert "Invalid thinking level" in mock_reply.call_args[0][0]
+
+        # 7. /ai reset
         await test_svc.record_usage(chat_id, 10, 20, 30)
         with patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply:
             await ai_command_handler(msg, CommandObject(prefix="/", command="ai", args="reset"))
@@ -521,7 +577,7 @@ async def test_munito_command_and_callback_handlers(tmp_path: Path):
             stats = await test_svc.get_chat_stats(chat_id)
             assert stats.request_count == 0
 
-        # 7. Callbacks
+        # 8. Callbacks
         cb_msg = Message(
             message_id=2,
             date=datetime.datetime.now(datetime.UTC),
@@ -567,6 +623,25 @@ async def test_munito_command_and_callback_handlers(tmp_path: Path):
             assert mock_edit.call_count == 1
             cfg = await test_svc.get_chat_config(chat_id)
             assert cfg.model != "qwen/qwen3.8-27b"
+
+        # Reasoning effort callback
+        cb_effort = CallbackQuery(
+            id="cb_eff",
+            from_user=user,
+            chat_instance="ci3",
+            data=f"ai:effort:{chat_id}",
+            message=cb_msg,
+        ).as_(bot)
+
+        with (
+            patch.object(CallbackQuery, "answer", new_callable=AsyncMock) as mock_cb_answer,
+            patch.object(Message, "edit_text", new_callable=AsyncMock) as mock_edit,
+        ):
+            await ai_callback_handler(cb_effort)
+            assert mock_cb_answer.call_count == 1
+            assert mock_edit.call_count == 1
+            cfg = await test_svc.get_chat_config(chat_id)
+            assert cfg.reasoning_effort in ["low", "none", "high"]
 
     test_svc.close()
 

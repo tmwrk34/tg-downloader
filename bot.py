@@ -61,6 +61,8 @@ from services.munito import (
     build_ai_keyboard,
     format_ai_card,
     get_next_model,
+    get_next_reasoning_effort,
+    markdown_to_telegram_html,
     split_telegram_message,
 )
 from services.worker import (
@@ -674,6 +676,17 @@ async def ai_command_handler(message: Message, command: CommandObject):
                 parse_mode="HTML",
             )
             return
+        elif subcmd in {"effort", "thinking", "reasoning"} and len(args) > 1:
+            req_effort = args[1].lower()
+            if req_effort in {"low", "none", "high"}:
+                cfg = await munito_service.update_chat_config(chat_id, reasoning_effort=req_effort)
+            else:
+                await message.reply(
+                    "⚠️ Invalid thinking level. Choose one of: <code>low</code> (fast, ~15s), "
+                    "<code>none</code> (instant, ~3s), <code>high</code> (deep reasoning, ~90s).",
+                    parse_mode="HTML",
+                )
+                return
         elif subcmd in {"reset", "скинути", "clear"}:
             await munito_service.reset_chat_stats(chat_id)
             stats = await munito_service.get_chat_stats(chat_id)
@@ -725,6 +738,10 @@ async def ai_callback_handler(callback: CallbackQuery):
         next_m = get_next_model(cfg.model)
         cfg = await munito_service.update_chat_config(target_chat_id, model=next_m)
         await callback.answer(f"Model: {next_m.split('/')[-1]}")
+    elif action == "effort":
+        next_eff = get_next_reasoning_effort(cfg.reasoning_effort)
+        cfg = await munito_service.update_chat_config(target_chat_id, reasoning_effort=next_eff)
+        await callback.answer(f"Thinking: {next_eff.title()}")
     elif action == "reset_prompt":
         confirm_reset = True
         await callback.answer()
@@ -1602,12 +1619,20 @@ async def _handle_ai_mention(message: Message, prompt: str, bot: Bot) -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await typing_task
 
-    chunks = split_telegram_message(reply_text)
-    for idx, chunk in enumerate(chunks):
-        if idx == 0:
-            await message.reply(chunk)
-        else:
-            await message.answer(chunk)
+    raw_chunks = split_telegram_message(reply_text)
+    for idx, raw_chunk in enumerate(raw_chunks):
+        formatted_chunk = markdown_to_telegram_html(raw_chunk)
+        try:
+            if idx == 0:
+                await message.reply(formatted_chunk, parse_mode="HTML")
+            else:
+                await message.answer(formatted_chunk, parse_mode="HTML")
+        except Exception as e:
+            logger.warning("Failed to send formatted HTML chunk: %s, falling back to plain text", e)
+            if idx == 0:
+                await message.reply(raw_chunk)
+            else:
+                await message.answer(raw_chunk)
 
 
 @dp.message(F.text | F.caption)
