@@ -19,6 +19,7 @@ from services.munito import (
 )
 from services.worker import set_message_reaction
 from utils.proxy import bot_proxy as bot
+from utils.responses import safe_reply
 from utils.telegram_media import download_telegram_photo
 from utils.typing import keep_typing
 
@@ -52,7 +53,8 @@ async def _extract_bot_tag_prompt(message: Message, active_bot: Bot) -> tuple[bo
 async def _handle_ai_mention(message: Message, prompt: str, active_bot: Bot) -> None:
     """Handle explicit @bot_username tag using Munito AI with text or vision context."""
     if not bot.munito_service.is_configured:
-        await message.reply(
+        await safe_reply(
+            message,
             "⚠️ Munito AI is not configured on the server (missing <code>MUNITO_API_KEY</code>).",
             parse_mode="HTML",
         )
@@ -74,7 +76,8 @@ async def _handle_ai_mention(message: Message, prompt: str, active_bot: Bot) -> 
         image_bytes = await download_telegram_photo(active_bot, message.photo[-1])
 
     if not prompt and not context_text and not image_bytes:
-        await message.reply(
+        await safe_reply(
+            message,
             "Hello! I am connected to an AI model. Ask me a question or tag me in reply to a message or photo.",
         )
         return
@@ -93,7 +96,7 @@ async def _handle_ai_mention(message: Message, prompt: str, active_bot: Bot) -> 
             )
     except Exception as e:
         logger.exception("Munito AI generation failed")
-        await message.reply(f"❌ AI Error: {e}")
+        await safe_reply(message, f"❌ AI Error: {e}")
         return
 
     raw_chunks = split_telegram_message(reply_text)
@@ -101,13 +104,13 @@ async def _handle_ai_mention(message: Message, prompt: str, active_bot: Bot) -> 
         formatted_chunk = markdown_to_telegram_html(raw_chunk)
         try:
             if idx == 0:
-                await message.reply(formatted_chunk, parse_mode="HTML")
+                await safe_reply(message, formatted_chunk, parse_mode="HTML")
             else:
                 await message.answer(formatted_chunk, parse_mode="HTML")
         except Exception as e:
             logger.warning("Failed to send formatted HTML chunk: %s, falling back to plain text", e)
             if idx == 0:
-                await message.reply(raw_chunk)
+                await safe_reply(message, raw_chunk)
             else:
                 await message.answer(raw_chunk)
 
@@ -119,7 +122,7 @@ async def ai_command_handler(message: Message, command: CommandObject) -> None:
     chat_title = message.chat.title or message.chat.first_name or "Private Chat"
 
     if not await is_chat_admin(message.bot, chat_id, user_id):
-        await message.reply("⚠️ Only chat administrators can configure the AI assistant.")
+        await safe_reply(message, "⚠️ Only chat administrators can configure the AI assistant.")
         return
 
     args = (command.args or "").strip().split()
@@ -142,14 +145,16 @@ async def ai_command_handler(message: Message, command: CommandObject) -> None:
                 cfg = await bot.munito_service.update_chat_config(chat_id, model=matched)
             else:
                 models_list = "\n".join(f"• <code>{m}</code>" for m in AVAILABLE_MODELS)
-                await message.reply(
+                await safe_reply(
+                    message,
                     f"⚠️ Unknown model: <code>{req_model}</code>.\nAvailable models:\n{models_list}",
                     parse_mode="HTML",
                 )
                 return
         elif subcmd in {"models", "моделі"}:
             models_list = "\n".join(f"• <code>{m}</code>" for m in AVAILABLE_MODELS)
-            await message.reply(
+            await safe_reply(
+                message,
                 f"🧠 <b>Available Munito AI models:</b>\n{models_list}\n\n"
                 f"Current: <code>{cfg.model}</code>\n"
                 f"Change: <code>/ai model &lt;name&gt;</code> or use the inline buttons.",
@@ -162,7 +167,8 @@ async def ai_command_handler(message: Message, command: CommandObject) -> None:
                 eff = "low" if req_effort == "none" else req_effort
                 cfg = await bot.munito_service.update_chat_config(chat_id, reasoning_effort=eff)
             else:
-                await message.reply(
+                await safe_reply(
+                    message,
                     "⚠️ Invalid thinking level. Choose one of: <code>low</code> (fast, ~15s), "
                     "<code>medium</code> (balanced, ~35s), <code>high</code> (deep reasoning, ~90s).",
                     parse_mode="HTML",
@@ -173,7 +179,8 @@ async def ai_command_handler(message: Message, command: CommandObject) -> None:
             stats = await bot.munito_service.get_chat_stats(chat_id)
             text = format_ai_card(chat_title, chat_id, cfg, stats)
             keyboard = build_ai_keyboard(chat_id, cfg)
-            await message.reply(
+            await safe_reply(
+                message,
                 "🧹 <b>Token usage statistics reset!</b>\n\n" + text,
                 reply_markup=keyboard,
                 parse_mode="HTML",
@@ -183,7 +190,7 @@ async def ai_command_handler(message: Message, command: CommandObject) -> None:
     stats = await bot.munito_service.get_chat_stats(chat_id)
     text = format_ai_card(chat_title, chat_id, cfg, stats)
     keyboard = build_ai_keyboard(chat_id, cfg)
-    await message.reply(text, reply_markup=keyboard, parse_mode="HTML")
+    await safe_reply(message, text, reply_markup=keyboard, parse_mode="HTML")
 
 
 @ai_router.callback_query(F.data.startswith("ai:"))
@@ -298,9 +305,10 @@ async def chatter_message_listener(message: Message, active_bot: Bot | None = No
         reply_sentence = await bot.chatter_service.generate(message.chat.id, seed_text=message.text)
         if reply_sentence:
             await bot.chatter_service.record_reply(message.chat.id)
-            await message.reply(reply_sentence)
+            await safe_reply(message, reply_sentence)
         elif is_chatter_keyword or is_reply_to_bot:
-            await message.reply(
+            await safe_reply(
+                message,
                 "<i>*Blinks confusedly...*</i>\n"
                 "(My vocabulary in this tavern is still empty! Talk more so I can learn to speak.)",
                 parse_mode="HTML",
