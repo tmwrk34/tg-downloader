@@ -662,7 +662,7 @@ async def inline_dice_handler(inline_query: InlineQuery):
                     ),
                 )
             )
-    else:
+    elif DiceParser.is_dice_query(query):
         cleaned_query, _ = DiceParser.normalize_input(query)
         try:
             res = DiceParser.parse_and_roll(cleaned_query)
@@ -690,6 +690,22 @@ async def inline_dice_handler(inline_query: InlineQuery):
                     ),
                 )
             )
+    else:
+        # Non-dice text (e.g. natural language prompts for AI assistant)
+        bot_user = await _get_cached_bot_user(inline_query.bot) if inline_query.bot else None
+        bot_tag = (
+            f"@{bot_user.username} " if (bot_user and getattr(bot_user, "username", None)) else ""
+        )
+        results.append(
+            InlineQueryResultArticle(
+                id=f"ai_{uuid.uuid4().hex[:8]}",
+                title=f"🤖 Запитати AI: {query[:45]}",
+                description=f"Надіслати '{query}' боту в чат",
+                input_message_content=InputTextMessageContent(
+                    message_text=f"{bot_tag}{query}",
+                ),
+            )
+        )
 
     await inline_query.answer(results=results, cache_time=1, is_personal=True)
 

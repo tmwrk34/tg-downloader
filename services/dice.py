@@ -258,6 +258,28 @@ class DiceParser:
             return False
 
     @classmethod
+    def is_dice_query(cls, raw: str) -> bool:
+        """
+        Check if raw input looks like an intended dice roll:
+        either contains dice terms (e.g. 2d6, d20, к20) or dice command verbs/prefixes.
+        """
+        text = raw.strip()
+        if not text:
+            return False
+
+        for pattern in cls.SECRET_PREFIX_PATTERNS:
+            if pattern.search(text):
+                return True
+
+        if cls.ROLL_CMD_PATTERN.search(text) or cls.ACTION_VERB_PATTERN.search(text):
+            return True
+
+        if cls.HAS_DICE_TERM_PATTERN.search(text):
+            return True
+
+        return False
+
+    @classmethod
     def parse_and_roll(cls, expr: str) -> DiceRollResult:
         """Parse dice expression and compute randomized roll results."""
         clean_expr, _ = cls.normalize_input(expr)
