@@ -391,5 +391,5 @@ async def test_inline_dice_handler_non_dice_prompt():
         results = kwargs.get("results")
         assert len(results) == 1
         assert results[0].id.startswith("ai_")
-        assert "Запитати AI" in results[0].title
+        assert "Ask AI" in results[0].title
         assert "це правда?" in results[0].description

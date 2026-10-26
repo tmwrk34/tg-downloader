@@ -176,9 +176,9 @@ async def test_munito_error_statuses():
     svc = MunitoAIService(api_key="test_key")
 
     for status_code, err_substr in [
-        (401, "Невірний або недійсний ключ"),
-        (429, "Перевищено ліміт"),
-        (503, "перевантажена"),
+        (401, "Invalid or unauthorized Munito API key"),
+        (429, "rate limit reached"),
+        (503, "overloaded"),
     ]:
         mock_resp = AsyncMock()
         mock_resp.status = status_code
@@ -251,6 +251,37 @@ async def test_handle_ai_mention_unconfigured():
 
 
 @pytest.mark.asyncio
+async def test_download_telegram_photo_local_file_and_fallback(tmp_path: Path):
+    from bot import _download_telegram_photo
+
+    local_img = tmp_path / "photo_local.jpg"
+    local_img.write_bytes(b"local_image_bytes")
+
+    bot_mock = AsyncMock()
+    fake_photo = MagicMock()
+    fake_photo.file_id = "f_123"
+
+    # Case 1: local file on disk
+    mock_file_local = MagicMock()
+    mock_file_local.file_path = str(local_img)
+    bot_mock.get_file = AsyncMock(return_value=mock_file_local)
+
+    res_local = await _download_telegram_photo(bot_mock, fake_photo)
+    assert res_local == b"local_image_bytes"
+
+    # Case 2: standard bot.download fallback
+    import io
+
+    mock_file_remote = MagicMock()
+    mock_file_remote.file_path = "photos/file_999.jpg"
+    bot_mock.get_file = AsyncMock(return_value=mock_file_remote)
+    bot_mock.download = AsyncMock(return_value=io.BytesIO(b"remote_image_bytes"))
+
+    res_remote = await _download_telegram_photo(bot_mock, fake_photo)
+    assert res_remote == b"remote_image_bytes"
+
+
+@pytest.mark.asyncio
 async def test_handle_ai_mention_with_reply_photo():
     import io
 
@@ -269,6 +300,9 @@ async def test_handle_ai_mention_with_reply_photo():
     msg.reply_to_message = replied_msg
 
     bot_mock = AsyncMock()
+    mock_file_info = MagicMock()
+    mock_file_info.file_path = "photos/test.jpg"
+    bot_mock.get_file = AsyncMock(return_value=mock_file_info)
     bot_mock.download = AsyncMock(return_value=io.BytesIO(b"binary_photo_data"))
 
     with (
@@ -393,22 +427,20 @@ def test_munito_models_and_cards():
         chat_id=123, request_count=5, prompt_tokens=500, completion_tokens=200, total_tokens=700
     )
     card = format_ai_card("D&D Chat", 123, cfg, stats)
-    assert "Налаштування Munito AI Асистента" in card
-    assert "🟢 Увімкнено" in card
+    assert "Munito AI Assistant Settings" in card
+    assert "🟢 Enabled" in card
     assert DEFAULT_MODEL in card
     assert "700" in card
 
     # Build keyboard
     kb = build_ai_keyboard(123, cfg)
-    assert any("Вимкнути" in btn.text for row in kb.inline_keyboard for btn in row)
+    assert any("Disable" in btn.text for row in kb.inline_keyboard for btn in row)
     assert any(
         DEFAULT_MODEL.split("/")[-1] in btn.text for row in kb.inline_keyboard for btn in row
     )
 
     kb_confirm = build_ai_keyboard(123, cfg, confirm_reset=True)
-    assert any(
-        "Підтвердити скидання" in btn.text for row in kb_confirm.inline_keyboard for btn in row
-    )
+    assert any("Confirm Reset" in btn.text for row in kb_confirm.inline_keyboard for btn in row)
 
 
 @pytest.mark.asyncio
@@ -446,8 +478,8 @@ async def test_munito_command_and_callback_handlers(tmp_path: Path):
             await ai_command_handler(msg, CommandObject(prefix="/", command="ai", args=""))
             assert mock_reply.call_count == 1
             card_text = mock_reply.call_args[0][0]
-            assert "Налаштування Munito AI Асистента" in card_text
-            assert "🟢 Увімкнено" in card_text
+            assert "Munito AI Assistant Settings" in card_text
+            assert "🟢 Enabled" in card_text
 
         # 2. /ai off
         with patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply:
@@ -477,7 +509,7 @@ async def test_munito_command_and_callback_handlers(tmp_path: Path):
             await ai_command_handler(msg, CommandObject(prefix="/", command="ai", args="models"))
             assert mock_reply.call_count == 1
             models_text = mock_reply.call_args[0][0]
-            assert "Доступні моделі Munito AI" in models_text
+            assert "Available Munito AI models" in models_text
             assert "deepseek-ai/deepseek-v4.1-flash-1017" in models_text
 
         # 6. /ai reset
@@ -485,7 +517,7 @@ async def test_munito_command_and_callback_handlers(tmp_path: Path):
         with patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply:
             await ai_command_handler(msg, CommandObject(prefix="/", command="ai", args="reset"))
             assert mock_reply.call_count == 1
-            assert "Статистику токенів скинуто!" in mock_reply.call_args[0][0]
+            assert "Token usage statistics reset!" in mock_reply.call_args[0][0]
             stats = await test_svc.get_chat_stats(chat_id)
             assert stats.request_count == 0
 
@@ -580,7 +612,7 @@ async def test_munito_generate_reply_with_chat_id_and_token_tracking(tmp_path: P
 
     # When disabled, should raise RuntimeError
     await svc.update_chat_config(chat_id, enabled=False)
-    with pytest.raises(RuntimeError, match="AI асистент вимкнено"):
+    with pytest.raises(RuntimeError, match="AI assistant is disabled"):
         await svc.generate_reply("Привіт знову", chat_id=chat_id)
 
     svc.close()

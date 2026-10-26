@@ -10,6 +10,7 @@ services:
     volumes:
       - bot_downloads:/app/downloads
       - ./data:/app/data
+      - bot_api_data:/var/lib/telegram-bot-api:ro
     depends_on:
       - telegram-bot-api
     logging:
