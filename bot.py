@@ -1,5 +1,7 @@
 import asyncio
+import contextlib
 import logging
+import re
 import time
 import uuid
 from typing import Any
@@ -50,6 +52,7 @@ from services.chatter import (
     ChatterStats,
 )
 from services.dice import DiceParser, get_secret_roll, store_secret_roll
+from services.munito import MunitoAIService, split_telegram_message
 from services.worker import (
     MediaWorkerLimiter,
     chat_action_heartbeat,
@@ -103,23 +106,31 @@ downloader_core = MediaDownloaderCore(download_dir="./downloads")
 platform_registry = PlatformServiceRegistry(downloader_core)
 media_cache = MediaCache()
 chatter_service = ChatterService()
+munito_service = MunitoAIService(
+    api_key=config.munito_api_key,
+    model=config.munito_model,
+    base_url=config.munito_base_url,
+    system_prompt=config.munito_system_prompt,
+)
 worker_limiter = MediaWorkerLimiter(
     max_concurrent_downloads=config.max_concurrent_downloads,
     max_concurrent_transcodes=config.max_concurrent_transcodes,
 )
 
-# Cached bot identity for mention and reply resolution
-_bot_user = None
-
 
 async def _get_cached_bot_user(bot: Bot) -> Any:
-    global _bot_user
-    if _bot_user is None:
-        try:
-            _bot_user = await bot.get_me()
-        except Exception as e:
-            logger.debug("Could not fetch bot user: %s", e)
-    return _bot_user
+    inst_dict = getattr(bot, "__dict__", None)
+    if isinstance(inst_dict, dict) and "_cached_user" in inst_dict:
+        return inst_dict["_cached_user"]
+
+    try:
+        user = await bot.get_me()
+        if isinstance(inst_dict, dict):
+            inst_dict["_cached_user"] = user
+        return user
+    except Exception as e:
+        logger.debug("Could not fetch bot user: %s", e)
+        return None
 
 
 async def _is_user_chatter_admin(bot: Bot | None, chat_id: int, user_id: int) -> bool:
@@ -1315,38 +1326,154 @@ async def youtube_callback_handler(callback: CallbackQuery):
                 await target_msg.edit_text(f"Failed to download YouTube media: {e}")
 
 
-@dp.message(F.text)
-async def chatter_message_listener(message: Message):
-    """
-    Chatterbot listener for group conversation:
-    passively learns vocabulary, occasionally sets emoji reactions,
-    and chimes in with Markov-generated sentences.
-    """
-    if not message.text or message.text.startswith("/"):
+async def _extract_bot_tag_prompt(message: Message, bot: Bot) -> tuple[bool, str]:
+    """Check if message explicitly contains @bot_username tag and extract prompt."""
+    bot_user = await _get_cached_bot_user(bot)
+    if not bot_user:
+        return False, ""
+
+    username = getattr(bot_user, "username", None)
+    if not isinstance(username, str) or not username.strip():
+        return False, ""
+
+    raw_text = message.text or message.caption or ""
+    if not raw_text:
+        return False, ""
+
+    pattern = rf"@{re.escape(username)}\b"
+    if not re.search(pattern, raw_text, re.IGNORECASE):
+        return False, ""
+
+    cleaned_prompt = re.sub(pattern, "", raw_text, flags=re.IGNORECASE).strip()
+    return True, cleaned_prompt
+
+
+async def _handle_ai_mention(message: Message, prompt: str, bot: Bot) -> None:
+    """Handle explicit @bot_username tag using Munito AI with text or vision context."""
+    if not munito_service.is_configured:
+        await message.reply(
+            "⚠️ Munito AI не налаштовано на сервері (відсутній <code>MUNITO_API_KEY</code>).",
+            parse_mode="HTML",
+        )
         return
 
-    # 1. Passive vocabulary learning
+    context_text: str | None = None
+    image_bytes: bytes | None = None
+
+    # Check if this message is a reply to another message
+    if message.reply_to_message:
+        replied = message.reply_to_message
+        if replied.photo:
+            try:
+                largest_photo = replied.photo[-1]
+                file_io = await bot.download(largest_photo)
+                if file_io:
+                    image_bytes = (
+                        file_io.getvalue() if hasattr(file_io, "getvalue") else file_io.read()
+                    )
+            except Exception as e:
+                logger.warning("Failed to download replied photo for Munito AI: %s", e)
+
+            if replied.caption:
+                context_text = replied.caption
+        elif replied.text:
+            context_text = replied.text
+    elif message.photo:
+        try:
+            largest_photo = message.photo[-1]
+            file_io = await bot.download(largest_photo)
+            if file_io:
+                image_bytes = file_io.getvalue() if hasattr(file_io, "getvalue") else file_io.read()
+        except Exception as e:
+            logger.warning("Failed to download attached photo for Munito AI: %s", e)
+
+    if not prompt and not context_text and not image_bytes:
+        await message.reply(
+            "Привіт! Я підключений до моделі штучного інтелекту. Запитай мене щось або тегни у відповіді на повідомлення чи зображення.",
+        )
+        return
+
+    stop_typing = asyncio.Event()
+
+    async def _typing_worker():
+        while not stop_typing.is_set():
+            try:
+                await bot.send_chat_action(chat_id=message.chat.id, action="typing")
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(stop_typing.wait(), timeout=4.0)
+            except TimeoutError:
+                pass
+
+    typing_task = asyncio.create_task(_typing_worker())
+
+    try:
+        reply_text = await munito_service.generate_reply(
+            prompt=prompt,
+            context_text=context_text,
+            image_bytes=image_bytes,
+        )
+    except Exception as e:
+        logger.exception("Munito AI generation failed")
+        await set_message_reaction(message, "❌")
+        await message.reply(f"❌ Помилка AI: {e}")
+        return
+    finally:
+        stop_typing.set()
+        typing_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await typing_task
+
+    chunks = split_telegram_message(reply_text)
+    for idx, chunk in enumerate(chunks):
+        if idx == 0:
+            await message.reply(chunk)
+        else:
+            await message.answer(chunk)
+
+
+@dp.message(F.text | F.caption)
+async def chatter_message_listener(message: Message, bot: Bot | None = None):
+    """
+    Message listener for group conversation:
+    1. If explicitly tagged with @bot_username, routes to Munito AI assistant.
+    2. Otherwise, passes through to passive Markov chatterbot engine.
+    """
+    raw_text = message.text or message.caption or ""
+    if not raw_text or raw_text.startswith("/"):
+        return
+
+    active_bot = bot or message.bot
+
+    # 1. Explicit mention check for Munito AI assistant
+    if active_bot:
+        is_tag, prompt = await _extract_bot_tag_prompt(message, active_bot)
+        if is_tag:
+            await _handle_ai_mention(message, prompt, active_bot)
+            return
+
+    # 2. Only text messages without @bot tag participate in Markov chatterbot
+    if not message.text:
+        return
+
+    # Passive vocabulary learning
     await chatter_service.train(message.chat.id, message.text)
 
     cfg = await chatter_service.get_config(message.chat.id)
     if not cfg.enabled:
         return
 
-    # 2. Random emoji reactions
+    # Random emoji reactions
     if chatter_service.should_react(cfg):
         reaction_emoji = chatter_service.pick_reaction()
         await set_message_reaction(message, reaction_emoji)
 
-    # 3. Check direct mention or reply to the bot
-    bot_user = await _get_cached_bot_user(message.bot) if message.bot else None
-    bot_username = bot_user.username.lower() if bot_user and bot_user.username else ""
+    # Check chatterbot keywords or reply to the bot without tag
+    bot_user = await _get_cached_bot_user(active_bot) if active_bot else None
     text_lower = message.text.lower()
 
-    is_mention = bool(
-        (bot_username and f"@{bot_username}" in text_lower)
-        or "бард" in text_lower
-        or "дурачок" in text_lower
-    )
+    is_chatter_keyword = bool("бард" in text_lower or "дурачок" in text_lower)
     is_reply_to_bot = bool(
         message.reply_to_message
         and message.reply_to_message.from_user
@@ -1354,12 +1481,14 @@ async def chatter_message_listener(message: Message):
         and message.reply_to_message.from_user.id == bot_user.id
     )
 
-    if chatter_service.should_reply(cfg, is_mention_or_reply=(is_mention or is_reply_to_bot)):
+    if chatter_service.should_reply(
+        cfg, is_mention_or_reply=(is_chatter_keyword or is_reply_to_bot)
+    ):
         reply_sentence = await chatter_service.generate(message.chat.id, seed_text=message.text)
         if reply_sentence:
             await chatter_service.record_reply(message.chat.id)
             await message.reply(reply_sentence)
-        elif is_mention or is_reply_to_bot:
+        elif is_chatter_keyword or is_reply_to_bot:
             await message.reply(
                 "<i>*Blinks confusedly...*</i>\n"
                 "(My vocabulary in this tavern is still empty! Talk more so I can learn to speak.)",

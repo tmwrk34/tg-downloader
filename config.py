@@ -15,6 +15,10 @@ class AppConfig:
     local_bot_api_url: str | None = None
     max_concurrent_downloads: int = 2
     max_concurrent_transcodes: int = 1
+    munito_api_key: str | None = None
+    munito_model: str = "deepseek-ai/deepseek-v4.1-flash-1017"
+    munito_base_url: str = "https://api.munito.ai/inference/v1"
+    munito_system_prompt: str | None = None
 
     @property
     def max_payload_bytes(self) -> int:
@@ -103,6 +107,17 @@ def load_config() -> AppConfig:
     max_concurrent_downloads = _parse_positive_int("MAX_CONCURRENT_DOWNLOADS", 2)
     max_concurrent_transcodes = _parse_positive_int("MAX_CONCURRENT_TRANSCODES", 1)
 
+    munito_api_key = os.getenv("MUNITO_API_KEY")
+    munito_api_key = munito_api_key.strip() if munito_api_key and munito_api_key.strip() else None
+    munito_model = os.getenv("MUNITO_MODEL", "deepseek-ai/deepseek-v4.1-flash-1017").strip()
+    munito_base_url = os.getenv("MUNITO_BASE_URL", "https://api.munito.ai/inference/v1").strip()
+    munito_system_prompt = os.getenv("MUNITO_SYSTEM_PROMPT")
+    munito_system_prompt = (
+        munito_system_prompt.strip()
+        if munito_system_prompt and munito_system_prompt.strip()
+        else None
+    )
+
     return AppConfig(
         bot_token=token.strip(),
         allowed_chat_ids=all_ids,
@@ -111,4 +126,8 @@ def load_config() -> AppConfig:
         local_bot_api_url=local_api_url,
         max_concurrent_downloads=max_concurrent_downloads,
         max_concurrent_transcodes=max_concurrent_transcodes,
+        munito_api_key=munito_api_key,
+        munito_model=munito_model,
+        munito_base_url=munito_base_url,
+        munito_system_prompt=munito_system_prompt,
     )

@@ -19,6 +19,9 @@ cookies.txt
 # Local runtime directories & volumes
 downloads/
 data/
+*.db
+*.db-wal
+*.db-shm
 
 # Testing and linting caches
 .pytest_cache/
