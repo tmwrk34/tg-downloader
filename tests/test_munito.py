@@ -14,6 +14,8 @@ from services.munito import (
     MunitoAIService,
     build_ai_keyboard,
     format_ai_card,
+    get_next_context_mode,
+    get_next_context_size,
     get_next_model,
     markdown_to_telegram_html,
     split_telegram_message,
@@ -729,5 +731,275 @@ async def test_munito_generate_reply_timeout():
     with patch("aiohttp.ClientSession", return_value=mock_session):
         with pytest.raises(RuntimeError, match="timed out"):
             await svc.generate_reply("Test timeout")
+
+    svc.close()
+
+
+def test_context_cycling_helpers():
+    # Context size cycling: 0 -> 5 -> 10 -> 15 -> 20 -> 0
+    assert get_next_context_size(0) == 5
+    assert get_next_context_size(5) == 10
+    assert get_next_context_size(10) == 15
+    assert get_next_context_size(15) == 20
+    assert get_next_context_size(20) == 0
+    assert get_next_context_size(99) == 10
+
+    # Context mode cycling: mentions <-> all
+    assert get_next_context_mode("mentions") == "all"
+    assert get_next_context_mode("all") == "mentions"
+    assert get_next_context_mode("MENTIONS") == "all"
+
+
+@pytest.mark.asyncio
+async def test_munito_history_crud_and_pruning(tmp_path: Path):
+    db_file = tmp_path / "test_hist.db"
+    svc = MunitoAIService(api_key="test_key", db_path=db_file)
+    chat_id = 12345
+
+    # Initially empty
+    assert await svc.get_history_count(chat_id) == 0
+    assert await svc.get_chat_history(chat_id) == []
+
+    # Record turns
+    await svc.record_turn(
+        chat_id=chat_id,
+        role="user",
+        content="Hello bot",
+        user_id=1,
+        user_name="Alice",
+    )
+    await svc.record_turn(
+        chat_id=chat_id,
+        role="assistant",
+        content="Hello Alice!",
+        user_id=None,
+        user_name="Bard-Bot",
+    )
+
+    assert await svc.get_history_count(chat_id) == 2
+    history = await svc.get_chat_history(chat_id, limit=10)
+    assert len(history) == 2
+    assert history[0].role == "user"
+    assert history[0].user_name == "Alice"
+    assert history[0].content == "Hello bot"
+    assert history[1].role == "assistant"
+    assert history[1].content == "Hello Alice!"
+
+    # Pruning test: insert 55 more turns (total 57) -> table should keep at most 50
+    for i in range(55):
+        await svc.record_turn(
+            chat_id=chat_id,
+            role="user",
+            content=f"Message {i}",
+            user_id=2,
+            user_name="Bob",
+        )
+
+    count = await svc.get_history_count(chat_id)
+    assert count == 50
+
+    # Clear history
+    deleted = await svc.clear_chat_history(chat_id)
+    assert deleted == 50
+    assert await svc.get_history_count(chat_id) == 0
+    assert await svc.get_chat_history(chat_id) == []
+
+    svc.close()
+
+
+@pytest.mark.asyncio
+async def test_munito_generate_reply_injects_and_records_context(tmp_path: Path):
+    db_file = tmp_path / "test_gen_ctx.db"
+    svc = MunitoAIService(api_key="test_key", db_path=db_file)
+    chat_id = 777
+
+    # Enable chat with context_size = 5
+    await svc.update_chat_config(chat_id, enabled=True, context_size=5)
+
+    # Pre-populate 2 historical turns
+    await svc.record_turn(
+        chat_id=chat_id,
+        role="user",
+        content="What is my name?",
+        user_id=10,
+        user_name="Charlie",
+    )
+    await svc.record_turn(
+        chat_id=chat_id,
+        role="assistant",
+        content="Your name is Charlie.",
+        user_id=None,
+        user_name="Bard-Bot",
+    )
+
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "You asked about capital cities.",
+                }
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+    }
+    mock_resp.__aenter__.return_value = mock_resp
+
+    mock_session = AsyncMock()
+    mock_session.post = MagicMock(return_value=mock_resp)
+    mock_session.__aenter__.return_value = mock_session
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        reply = await svc.generate_reply(
+            prompt="And what did I ask before that?",
+            chat_id=chat_id,
+            user_id=10,
+            user_name="Charlie",
+        )
+        assert reply == "You asked about capital cities."
+
+        # Check payload messages sent to API
+        call_args = mock_session.post.call_args
+        _, kwargs = call_args
+        payload = kwargs["json"]
+        sent_messages = payload["messages"]
+
+        # 1 system + 2 historical + 1 current user turn = 4
+        assert len(sent_messages) == 4
+        assert sent_messages[0]["role"] == "system"
+        assert sent_messages[1]["role"] == "user"
+        assert sent_messages[1]["content"] == "[Charlie]: What is my name?"
+        assert sent_messages[2]["role"] == "assistant"
+        assert sent_messages[2]["content"] == "Your name is Charlie."
+        assert sent_messages[3]["role"] == "user"
+        assert (
+            sent_messages[3]["content"][0]["text"] == "[Charlie]: And what did I ask before that?"
+        )
+
+        # History should now have 4 turns (2 old + 1 new user + 1 new assistant)
+        assert await svc.get_history_count(chat_id) == 4
+
+    svc.close()
+
+
+@pytest.mark.asyncio
+async def test_ai_command_context_and_mode_and_forget(tmp_path: Path):
+    from handlers.ai import ai_command_handler
+
+    db_file = tmp_path / "test_cmd_ctx.db"
+    svc = MunitoAIService(api_key="test_key", db_path=db_file)
+    chat_id = -100555
+    admin_id = 999
+
+    fake_bot = AsyncMock()
+    fake_bot.get_chat_member.return_value = MagicMock(status="administrator")
+
+    chat = Chat(id=chat_id, type="supergroup", title="Test Tavern")
+    user = User(id=admin_id, is_bot=False, first_name="Admin")
+    msg = Message(
+        message_id=1,
+        date=datetime.datetime.now(datetime.UTC),
+        chat=chat,
+        from_user=user,
+        text="/ai",
+    ).as_(fake_bot)
+
+    with (
+        patch("handlers.ai.bot.munito_service", svc),
+        patch.object(Message, "reply", new_callable=AsyncMock),
+    ):
+        # 1. /ai context 15
+        cmd_ctx = CommandObject(prefix="/", command="ai", args="context 15")
+        await ai_command_handler(msg, cmd_ctx)
+        cfg = await svc.get_chat_config(chat_id)
+        assert cfg.context_size == 15
+
+        # 2. /ai mode all
+        cmd_mode = CommandObject(prefix="/", command="ai", args="mode all")
+        await ai_command_handler(msg, cmd_mode)
+        cfg = await svc.get_chat_config(chat_id)
+        assert cfg.context_mode == "all"
+
+        # 3. Add turns then /ai forget
+        await svc.record_turn(chat_id, role="user", content="Test message")
+        assert await svc.get_history_count(chat_id) == 1
+
+        cmd_forget = CommandObject(prefix="/", command="ai", args="forget")
+        await ai_command_handler(msg, cmd_forget)
+        assert await svc.get_history_count(chat_id) == 0
+
+    svc.close()
+
+
+@pytest.mark.asyncio
+async def test_ai_callback_context_and_mode(tmp_path: Path):
+    from handlers.ai import ai_callback_handler
+
+    db_file = tmp_path / "test_cb_ctx.db"
+    svc = MunitoAIService(api_key="test_key", db_path=db_file)
+    chat_id = -100888
+    admin_id = 999
+
+    fake_bot = AsyncMock()
+    fake_bot.get_chat_member.return_value = MagicMock(status="administrator")
+
+    chat = Chat(id=chat_id, type="supergroup", title="Test Tavern")
+    user = User(id=admin_id, is_bot=False, first_name="Admin")
+
+    target_msg = Message(
+        message_id=2,
+        date=datetime.datetime.now(datetime.UTC),
+        chat=chat,
+        from_user=user,
+        text="Card",
+    ).as_(fake_bot)
+
+    with (
+        patch("handlers.ai.bot.munito_service", svc),
+        patch.object(CallbackQuery, "answer", new_callable=AsyncMock),
+        patch.object(Message, "edit_text", new_callable=AsyncMock),
+    ):
+        # 1. Cycle context size: default 10 -> 15
+        cb_size = CallbackQuery(
+            id="cb_size",
+            from_user=user,
+            chat_instance="ci1",
+            data=f"ai:ctx_size:{chat_id}",
+            message=target_msg,
+        ).as_(fake_bot)
+
+        await ai_callback_handler(cb_size)
+        cfg = await svc.get_chat_config(chat_id)
+        assert cfg.context_size == 15
+
+        # 2. Toggle context mode: default "mentions" -> "all"
+        cb_mode = CallbackQuery(
+            id="cb_mode",
+            from_user=user,
+            chat_instance="ci2",
+            data=f"ai:ctx_mode:{chat_id}",
+            message=target_msg,
+        ).as_(fake_bot)
+
+        await ai_callback_handler(cb_mode)
+        cfg = await svc.get_chat_config(chat_id)
+        assert cfg.context_mode == "all"
+
+        # 3. Clear memory callback
+        await svc.record_turn(chat_id, role="user", content="Ping")
+        assert await svc.get_history_count(chat_id) == 1
+
+        cb_clear = CallbackQuery(
+            id="cb_clear",
+            from_user=user,
+            chat_instance="ci3",
+            data=f"ai:clear_mem:{chat_id}",
+            message=target_msg,
+        ).as_(fake_bot)
+
+        await ai_callback_handler(cb_clear)
+        assert await svc.get_history_count(chat_id) == 0
 
     svc.close()

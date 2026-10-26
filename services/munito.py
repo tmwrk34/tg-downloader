@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,8 @@ AVAILABLE_MODELS = [
 ]
 
 REASONING_EFFORT_LEVELS = ["low", "medium", "high"]
+CONTEXT_SIZE_OPTIONS = [0, 5, 10, 15, 20]
+CONTEXT_MODE_OPTIONS = ["mentions", "all"]
 
 
 def resolve_default_ai_db() -> str:
@@ -66,6 +69,20 @@ class AIChatConfig:
     model: str = DEFAULT_MODEL
     system_prompt: str | None = None
     reasoning_effort: str = "low"
+    context_mode: str = "mentions"  # "mentions" | "all"
+    context_size: int = 10  # number of recent messages to inject (0 = disabled)
+
+
+@dataclass(frozen=True)
+class AIChatTurn:
+    id: int
+    chat_id: int
+    user_id: int | None
+    user_name: str | None
+    role: str
+    content: str
+    has_image: bool
+    created_at: float
 
 
 @dataclass(frozen=True)
@@ -95,13 +112,28 @@ def get_next_reasoning_effort(current_effort: str) -> str:
         return REASONING_EFFORT_LEVELS[0]
 
 
+def get_next_context_size(current_size: int) -> int:
+    """Cycle context size: 0 -> 5 -> 10 -> 15 -> 20 -> 0."""
+    try:
+        idx = CONTEXT_SIZE_OPTIONS.index(current_size)
+        return CONTEXT_SIZE_OPTIONS[(idx + 1) % len(CONTEXT_SIZE_OPTIONS)]
+    except ValueError:
+        return 10
+
+
+def get_next_context_mode(current_mode: str) -> str:
+    """Toggle context collection mode between 'mentions' and 'all'."""
+    return "all" if current_mode.lower() == "mentions" else "mentions"
+
+
 def format_ai_card(
     chat_title: str,
     chat_id: int,
     cfg: AIChatConfig,
     stats: AIChatStats,
+    history_count: int = 0,
 ) -> str:
-    """Format AI assistant status, model, and token usage into an HTML message."""
+    """Format AI assistant status, model, context memory, and token usage into an HTML message."""
     status_str = "🟢 Enabled" if cfg.enabled else "🔴 Disabled"
     effort_labels = {
         "low": "⚡ Low (Fast, ~15s)",
@@ -110,6 +142,17 @@ def format_ai_card(
         "high": "🧠 High (Deep CoT, ~90s)",
     }
     effort_display = effort_labels.get(cfg.reasoning_effort, cfg.reasoning_effort)
+    mode_labels = {
+        "mentions": "🎯 Mentions Only",
+        "all": "🌐 All Chat Messages",
+    }
+    mode_display = mode_labels.get(cfg.context_mode, cfg.context_mode)
+
+    if cfg.context_size > 0:
+        memory_str = f"🟢 Active ({history_count}/{cfg.context_size} msgs, {mode_display})"
+    else:
+        memory_str = "⚪ Disabled (0 msgs)"
+
     return (
         f"🤖 <b>Munito AI Assistant Settings</b>\n"
         f"<b>Chat:</b> <code>{chat_title}</code> (<code>{chat_id}</code>)\n"
@@ -117,6 +160,7 @@ def format_ai_card(
         f"⚡ <b>Status:</b> {status_str}\n"
         f"🧠 <b>Model:</b> <code>{cfg.model}</code>\n"
         f"💭 <b>Thinking:</b> <code>{effort_display}</code>\n"
+        f"💬 <b>Memory:</b> <code>{memory_str}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Token Usage:</b>\n"
         f"  • Total requests: <b>{stats.request_count:,}</b>\n"
@@ -134,6 +178,9 @@ def build_ai_keyboard(
     """Construct inline keyboard for AI configuration."""
     toggle_text = "🔴 Disable" if cfg.enabled else "🟢 Enable"
     model_short = cfg.model.split("/")[-1]
+    mode_short = "🎯 Mentions" if cfg.context_mode == "mentions" else "🌐 All Chat"
+    ctx_text = f"💬 Context: {cfg.context_size} msgs" if cfg.context_size > 0 else "💬 Context: Off"
+
     rows = [
         [
             InlineKeyboardButton(
@@ -153,13 +200,29 @@ def build_ai_keyboard(
                 callback_data=f"ai:effort:{chat_id}",
             )
         ],
+        [
+            InlineKeyboardButton(
+                text=ctx_text,
+                callback_data=f"ai:ctx_size:{chat_id}",
+            ),
+            InlineKeyboardButton(
+                text=f"Mode: {mode_short}",
+                callback_data=f"ai:ctx_mode:{chat_id}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🧠 Forget Context",
+                callback_data=f"ai:clear_mem:{chat_id}",
+            )
+        ],
     ]
 
     if confirm_reset:
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="⚠️ Confirm Reset",
+                    text="⚠️ Confirm Reset Stats",
                     callback_data=f"ai:reset_confirm:{chat_id}",
                 ),
                 InlineKeyboardButton(
@@ -350,7 +413,9 @@ class MunitoAIService:
                     enabled INTEGER NOT NULL DEFAULT 1,
                     model TEXT NOT NULL DEFAULT 'deepseek-ai/deepseek-v4.1-flash-1017',
                     system_prompt TEXT,
-                    reasoning_effort TEXT NOT NULL DEFAULT 'low'
+                    reasoning_effort TEXT NOT NULL DEFAULT 'low',
+                    context_mode TEXT NOT NULL DEFAULT 'mentions',
+                    context_size INTEGER NOT NULL DEFAULT 10
                 )
                 """
             )
@@ -358,6 +423,32 @@ class MunitoAIService:
                 self._conn.execute(
                     "ALTER TABLE ai_chat_settings ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT 'low'"
                 )
+            with contextlib.suppress(sqlite3.OperationalError):
+                self._conn.execute(
+                    "ALTER TABLE ai_chat_settings ADD COLUMN context_mode TEXT NOT NULL DEFAULT 'mentions'"
+                )
+            with contextlib.suppress(sqlite3.OperationalError):
+                self._conn.execute(
+                    "ALTER TABLE ai_chat_settings ADD COLUMN context_size INTEGER NOT NULL DEFAULT 10"
+                )
+
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ai_chat_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER,
+                    user_name TEXT,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    has_image INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ai_history_chat ON ai_chat_history (chat_id, id);"
+            )
 
             self._conn.execute(
                 """
@@ -379,29 +470,45 @@ class MunitoAIService:
 
             cursor = self._conn.cursor()
             cursor.execute(
-                "SELECT enabled, model, system_prompt, reasoning_effort FROM ai_chat_settings WHERE chat_id = ?",
+                "SELECT enabled, model, system_prompt, reasoning_effort, context_mode, context_size FROM ai_chat_settings WHERE chat_id = ?",
                 (chat_id,),
             )
             row = cursor.fetchone()
             if row:
                 effort = str(row[3]) if len(row) > 3 and row[3] else "low"
+                ctx_mode = str(row[4]) if len(row) > 4 and row[4] else "mentions"
+                ctx_size = int(row[5]) if len(row) > 5 and row[5] is not None else 10
                 cfg = AIChatConfig(
                     chat_id=chat_id,
                     enabled=bool(row[0]),
                     model=str(row[1]) if row[1] else self.default_model,
                     system_prompt=row[2],
                     reasoning_effort=effort,
+                    context_mode=ctx_mode,
+                    context_size=ctx_size,
                 )
             else:
                 cfg = AIChatConfig(
-                    chat_id=chat_id, model=self.default_model, reasoning_effort="low"
+                    chat_id=chat_id,
+                    model=self.default_model,
+                    reasoning_effort="low",
+                    context_mode="mentions",
+                    context_size=10,
                 )
                 self._conn.execute(
                     """
-                    INSERT OR IGNORE INTO ai_chat_settings (chat_id, enabled, model, system_prompt, reasoning_effort)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT OR IGNORE INTO ai_chat_settings (chat_id, enabled, model, system_prompt, reasoning_effort, context_mode, context_size)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (chat_id, int(cfg.enabled), cfg.model, cfg.system_prompt, cfg.reasoning_effort),
+                    (
+                        chat_id,
+                        int(cfg.enabled),
+                        cfg.model,
+                        cfg.system_prompt,
+                        cfg.reasoning_effort,
+                        cfg.context_mode,
+                        cfg.context_size,
+                    ),
                 )
                 self._conn.commit()
 
@@ -417,10 +524,18 @@ class MunitoAIService:
 
             self._conn.execute(
                 """
-                INSERT OR REPLACE INTO ai_chat_settings (chat_id, enabled, model, system_prompt, reasoning_effort)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO ai_chat_settings (chat_id, enabled, model, system_prompt, reasoning_effort, context_mode, context_size)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (chat_id, int(cfg.enabled), cfg.model, cfg.system_prompt, cfg.reasoning_effort),
+                (
+                    chat_id,
+                    int(cfg.enabled),
+                    cfg.model,
+                    cfg.system_prompt,
+                    cfg.reasoning_effort,
+                    cfg.context_mode,
+                    cfg.context_size,
+                ),
             )
             self._conn.commit()
             self._config_cache[chat_id] = cfg
@@ -478,6 +593,88 @@ class MunitoAIService:
             self._conn.commit()
             self._stats_cache.pop(chat_id, None)
 
+    def _sync_record_turn(
+        self,
+        chat_id: int,
+        role: str,
+        content: str,
+        user_id: int | None = None,
+        user_name: str | None = None,
+        has_image: bool = False,
+    ) -> None:
+        """Record a single dialogue turn into ai_chat_history with pruning to 50 entries."""
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO ai_chat_history (chat_id, user_id, user_name, role, content, has_image, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (chat_id, user_id, user_name, role, content, int(has_image), time.time()),
+            )
+            # Prune older messages per chat to keep table size bounded
+            self._conn.execute(
+                """
+                DELETE FROM ai_chat_history
+                WHERE chat_id = ? AND id NOT IN (
+                    SELECT id FROM ai_chat_history WHERE chat_id = ? ORDER BY id DESC LIMIT 50
+                )
+                """,
+                (chat_id, chat_id),
+            )
+            self._conn.commit()
+
+    def _sync_get_chat_history(self, chat_id: int, limit: int = 10) -> list[AIChatTurn]:
+        """Fetch the most recent turns for a chat in chronological order."""
+        if limit <= 0:
+            return []
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, chat_id, user_id, user_name, role, content, has_image, created_at
+                FROM ai_chat_history
+                WHERE chat_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            )
+            rows = cursor.fetchall()
+            turns = [
+                AIChatTurn(
+                    id=row[0],
+                    chat_id=row[1],
+                    user_id=row[2],
+                    user_name=row[3],
+                    role=row[4],
+                    content=row[5],
+                    has_image=bool(row[6]),
+                    created_at=row[7],
+                )
+                for row in reversed(rows)
+            ]
+            return turns
+
+    def _sync_get_history_count(self, chat_id: int) -> int:
+        """Get the total number of stored history entries for a chat."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM ai_chat_history WHERE chat_id = ?",
+                (chat_id,),
+            )
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+
+    def _sync_clear_chat_history(self, chat_id: int) -> int:
+        """Delete all history entries for a chat and return count deleted."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute("DELETE FROM ai_chat_history WHERE chat_id = ?", (chat_id,))
+            deleted = cursor.rowcount
+            self._conn.commit()
+            return deleted
+
     async def get_chat_config(self, chat_id: int) -> AIChatConfig:
         return await asyncio.to_thread(self._sync_get_chat_config, chat_id)
 
@@ -497,6 +694,34 @@ class MunitoAIService:
     async def reset_chat_stats(self, chat_id: int) -> None:
         await asyncio.to_thread(self._sync_reset_chat_stats, chat_id)
 
+    async def record_turn(
+        self,
+        chat_id: int,
+        role: str,
+        content: str,
+        user_id: int | None = None,
+        user_name: str | None = None,
+        has_image: bool = False,
+    ) -> None:
+        await asyncio.to_thread(
+            self._sync_record_turn,
+            chat_id,
+            role,
+            content,
+            user_id,
+            user_name,
+            has_image,
+        )
+
+    async def get_chat_history(self, chat_id: int, limit: int = 10) -> list[AIChatTurn]:
+        return await asyncio.to_thread(self._sync_get_chat_history, chat_id, limit)
+
+    async def get_history_count(self, chat_id: int) -> int:
+        return await asyncio.to_thread(self._sync_get_history_count, chat_id)
+
+    async def clear_chat_history(self, chat_id: int) -> int:
+        return await asyncio.to_thread(self._sync_clear_chat_history, chat_id)
+
     def close(self) -> None:
         """Close SQLite database connection."""
         with self._lock:
@@ -513,16 +738,19 @@ class MunitoAIService:
         image_mime: str = "image/jpeg",
         model: str | None = None,
         chat_id: int | None = None,
+        user_id: int | None = None,
+        user_name: str | None = None,
     ) -> str:
         """
         Generate completion from Munito AI with optional referenced text or image context.
-        Tracks token usage in SQLite when chat_id is provided.
+        Tracks token usage in SQLite and maintains conversation memory when chat_id is provided.
         """
         if not self.is_configured:
             raise RuntimeError("Munito API key is not configured (MUNITO_API_KEY is missing)")
 
         target_model = model or self.default_model
         system_prompt = self.system_prompt
+        cfg: AIChatConfig | None = None
 
         if chat_id is not None:
             cfg = await self.get_chat_config(chat_id)
@@ -534,6 +762,16 @@ class MunitoAIService:
                 system_prompt = cfg.system_prompt
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+
+        # Inject conversation history if context memory is active for this chat
+        if chat_id is not None and cfg is not None and cfg.context_size > 0:
+            history = await self.get_chat_history(chat_id, limit=cfg.context_size)
+            for turn in history:
+                if turn.role == "assistant":
+                    messages.append({"role": "assistant", "content": turn.content})
+                else:
+                    prefix = f"[{turn.user_name}]: " if turn.user_name else ""
+                    messages.append({"role": "user", "content": f"{prefix}{turn.content}"})
 
         user_content: list[dict[str, Any]] = []
 
@@ -547,8 +785,13 @@ class MunitoAIService:
         elif not image_bytes:
             full_text_prompt += "Explain or reply to this message."
 
-        if full_text_prompt:
-            user_content.append({"type": "text", "text": full_text_prompt})
+        # Prepend sender name if available so the model distinguishes different speakers in groups
+        user_display_prompt = full_text_prompt
+        if user_name:
+            user_display_prompt = f"[{user_name}]: {full_text_prompt}"
+
+        if user_display_prompt:
+            user_content.append({"type": "text", "text": user_display_prompt})
 
         # If user attached or referenced an image
         if image_bytes:
@@ -687,6 +930,30 @@ class MunitoAIService:
             content = message_obj["reasoning"]
 
         if not content or not str(content).strip():
-            return "<i>(Model returned an empty response)</i>"
+            reply_result = "<i>(Model returned an empty response)</i>"
+        else:
+            reply_result = str(content).strip()
 
-        return str(content).strip()
+        # Record conversation turns in history if memory is active
+        if chat_id is not None and cfg is not None and cfg.context_size > 0:
+            hist_user_text = full_text_prompt
+            if image_bytes:
+                hist_user_text = f"[Photo attached] {full_text_prompt}".strip()
+            await self.record_turn(
+                chat_id=chat_id,
+                role="user",
+                content=hist_user_text,
+                user_id=user_id,
+                user_name=user_name,
+                has_image=bool(image_bytes),
+            )
+            await self.record_turn(
+                chat_id=chat_id,
+                role="assistant",
+                content=reply_result,
+                user_id=None,
+                user_name="Bard-Bot",
+                has_image=False,
+            )
+
+        return reply_result

@@ -12,6 +12,8 @@ from services.munito import (
     AVAILABLE_MODELS,
     build_ai_keyboard,
     format_ai_card,
+    get_next_context_mode,
+    get_next_context_size,
     get_next_model,
     get_next_reasoning_effort,
     markdown_to_telegram_html,
@@ -86,6 +88,8 @@ async def _handle_ai_mention(message: Message, prompt: str, active_bot: Bot) -> 
 
     chat_id = message.chat.id
     image_mime = "image/jpeg" if image_bytes else None
+    user_id = message.from_user.id if message.from_user else None
+    user_name = message.from_user.first_name if message.from_user else None
 
     try:
         async with keep_typing(active_bot, chat_id, action="typing"):
@@ -95,6 +99,8 @@ async def _handle_ai_mention(message: Message, prompt: str, active_bot: Bot) -> 
                 image_bytes=image_bytes,
                 image_mime=image_mime,
                 chat_id=chat_id,
+                user_id=user_id,
+                user_name=user_name,
             )
     except Exception as e:
         logger.exception("Munito AI generation failed")
@@ -181,10 +187,48 @@ async def ai_command_handler(message: Message, command: CommandObject) -> None:
                     parse_mode="HTML",
                 )
                 return
+        elif subcmd in {"context", "контекст", "memory", "пам'ять"} and len(args) > 1:
+            try:
+                val = max(0, min(30, int(args[1].strip())))
+                cfg = await bot.munito_service.update_chat_config(chat_id, context_size=val)
+            except ValueError:
+                await safe_reply(
+                    message,
+                    "⚠️ Invalid context size. Enter a number between 0 and 30 messages (e.g. <code>/ai context 10</code>).",
+                    parse_mode="HTML",
+                )
+                return
+        elif subcmd in {"mode", "режим"} and len(args) > 1:
+            req_mode = args[1].lower().strip()
+            if req_mode in {"mentions", "згадки", "mention", "tag", "тег"}:
+                cfg = await bot.munito_service.update_chat_config(chat_id, context_mode="mentions")
+            elif req_mode in {"all", "всі", "все", "чат", "chat"}:
+                cfg = await bot.munito_service.update_chat_config(chat_id, context_mode="all")
+            else:
+                await safe_reply(
+                    message,
+                    "⚠️ Invalid mode. Choose <code>mentions</code> (record only @bot) or <code>all</code> (record all chat messages).",
+                    parse_mode="HTML",
+                )
+                return
+        elif subcmd in {"forget", "забудь", "clear_memory", "clearmem", "очистити_пам'ять"}:
+            deleted = await bot.munito_service.clear_chat_history(chat_id)
+            stats = await bot.munito_service.get_chat_stats(chat_id)
+            text = format_ai_card(chat_title, chat_id, cfg, stats, history_count=0)
+            keyboard = build_ai_keyboard(chat_id, cfg)
+            await safe_reply(
+                message,
+                f"🧹 <b>Conversation memory wiped!</b> (Removed {deleted} historical messages)\n\n"
+                + text,
+                reply_markup=keyboard,
+                parse_mode="HTML",
+            )
+            return
         elif subcmd in {"reset", "скинути", "clear"}:
             await bot.munito_service.reset_chat_stats(chat_id)
             stats = await bot.munito_service.get_chat_stats(chat_id)
-            text = format_ai_card(chat_title, chat_id, cfg, stats)
+            history_count = await bot.munito_service.get_history_count(chat_id)
+            text = format_ai_card(chat_title, chat_id, cfg, stats, history_count=history_count)
             keyboard = build_ai_keyboard(chat_id, cfg)
             await safe_reply(
                 message,
@@ -195,7 +239,8 @@ async def ai_command_handler(message: Message, command: CommandObject) -> None:
             return
 
     stats = await bot.munito_service.get_chat_stats(chat_id)
-    text = format_ai_card(chat_title, chat_id, cfg, stats)
+    history_count = await bot.munito_service.get_history_count(chat_id)
+    text = format_ai_card(chat_title, chat_id, cfg, stats, history_count=history_count)
     keyboard = build_ai_keyboard(chat_id, cfg)
     await safe_reply(message, text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -237,6 +282,21 @@ async def ai_callback_handler(callback: CallbackQuery) -> None:
         next_eff = get_next_reasoning_effort(cfg.reasoning_effort)
         cfg = await bot.munito_service.update_chat_config(target_chat_id, reasoning_effort=next_eff)
         await callback.answer(f"Thinking: {next_eff.title()}")
+    elif action == "ctx_size":
+        next_size = get_next_context_size(cfg.context_size)
+        cfg = await bot.munito_service.update_chat_config(target_chat_id, context_size=next_size)
+        await callback.answer(
+            f"Context: {next_size} msgs" if next_size > 0 else "Context: Disabled"
+        )
+    elif action == "ctx_mode":
+        next_mode = get_next_context_mode(cfg.context_mode)
+        cfg = await bot.munito_service.update_chat_config(target_chat_id, context_mode=next_mode)
+        await callback.answer(
+            f"Mode: {'🎯 Mentions' if next_mode == 'mentions' else '🌐 All Chat'}"
+        )
+    elif action == "clear_mem":
+        deleted = await bot.munito_service.clear_chat_history(target_chat_id)
+        await callback.answer(f"🧹 Memory wiped ({deleted} msgs deleted)!", show_alert=True)
     elif action == "reset_prompt":
         confirm_reset = True
         await callback.answer()
@@ -250,7 +310,8 @@ async def ai_callback_handler(callback: CallbackQuery) -> None:
     if target_msg:
         chat_title = target_msg.chat.title or target_msg.chat.first_name or "Chat"
         stats = await bot.munito_service.get_chat_stats(target_chat_id)
-        text = format_ai_card(chat_title, target_chat_id, cfg, stats)
+        history_count = await bot.munito_service.get_history_count(target_chat_id)
+        text = format_ai_card(chat_title, target_chat_id, cfg, stats, history_count=history_count)
         keyboard = build_ai_keyboard(target_chat_id, cfg, confirm_reset=confirm_reset)
         try:
             await target_msg.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
@@ -263,7 +324,8 @@ async def chatter_message_listener(message: Message, active_bot: Bot | None = No
     """
     Message listener for group conversation:
     1. If explicitly tagged with @bot_username, routes to Munito AI assistant.
-    2. Otherwise, passes through to passive Markov chatterbot engine.
+    2. If AI memory mode is 'all', passively records chat message into conversation memory.
+    3. Otherwise, passes through to passive Markov chatterbot engine.
     """
     raw_text = message.text or message.caption or ""
     if not raw_text or raw_text.startswith("/"):
@@ -278,7 +340,28 @@ async def chatter_message_listener(message: Message, active_bot: Bot | None = No
             await _handle_ai_mention(message, prompt, current_bot)
             return
 
-    # 2. Only text messages without @bot tag participate in Markov chatterbot
+    # 2. Passive conversational memory capture when mode is 'all'
+    if bot.munito_service.is_configured:
+        try:
+            ai_cfg = await bot.munito_service.get_chat_config(message.chat.id)
+            if ai_cfg.enabled and ai_cfg.context_size > 0 and ai_cfg.context_mode == "all":
+                sender_name = message.from_user.first_name if message.from_user else "User"
+                sender_id = message.from_user.id if message.from_user else None
+                rec_text = raw_text
+                if message.photo:
+                    rec_text = f"[Photo attached] {raw_text}".strip()
+                await bot.munito_service.record_turn(
+                    chat_id=message.chat.id,
+                    role="user",
+                    content=rec_text,
+                    user_id=sender_id,
+                    user_name=sender_name,
+                    has_image=bool(message.photo),
+                )
+        except Exception as e:
+            logger.debug("Failed to passively record message in AI context: %s", e)
+
+    # 3. Only text messages without @bot tag participate in Markov chatterbot
     if not message.text:
         return
 
