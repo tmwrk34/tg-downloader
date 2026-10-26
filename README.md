@@ -78,8 +78,62 @@ A high-performance Telegram bot built with **aiogram 3** and **yt-dlp** for down
   - Uses candidate seed words from the user's message to anchor responses relevant to the ongoing conversation.
   - Reacts with thematic tavern emojis (`🤡`, `🎲`, `🍺`, `🔥`, `🗿`, `⚡`, `🫡`, `🤔`, etc.).
 
+### 🤖 Munito AI Assistant (Grok / DeepSeek)
+- **Tag & Reply Triggers**: Mention `@bard_taverna_bot <prompt>` or reply to any photo/message to invoke the AI assistant.
+- **Multimodal Vision**: Accurately analyzes photos and reply images using EU-hosted open models.
+- **Adjustable Reasoning Effort (CoT)**:
+  - `⚡ Low (~15s)` (default): Limits chain-of-thought generation tokens, speeding up response times by 75% compared to unbounded reasoning.
+  - `⚖️ Medium (~35s)`: Balanced thinking for deeper mathematical or code queries.
+  - `🧠 High (~90s)`: Full chain-of-thought exploration for complex questions.
+- **Dynamic Model Switching**: Switch models on the fly between `deepseek-ai/deepseek-v4.1-flash-1017`, `deepseek-ai/deepseek-v4-flash`, `qwen/qwen3.8-27b`, `meta-llama/llama-4-scout-17b-16k`, and `google/gemma-4-12b`.
+- **Telegram HTML Markdown Interpreter**: Formats headings, bold, italic, code blocks, bullet points, and inline links cleanly for Telegram with safe character escaping and plain-text fallback.
+- **Token Accounting & Settings (`/ai`)**:
+  - `/ai` — Interactive settings card with inline buttons to toggle state, switch models, adjust thinking effort, and view token usage.
+  - `/ai on` / `/ai off` — Enable or disable AI assistant for the chat.
+  - `/ai model <name>` — Set the active model.
+  - `/ai effort <low|medium|high>` — Set reasoning effort level.
+  - `/ai reset` — Reset chat token metrics.
+
 ### 🔒 Security & Access Control
 - **Whitelist Middleware**: Restricts all interactions strictly to chat IDs specified in `ALLOWED_CHAT_IDS`. Unauthorized messages are dropped silently.
+- **Admin Authorization**: Configuration commands (`/chatter`, `/ai`) are strictly limited to chat administrators and bot superadmins.
+
+---
+
+## Architecture & Codebase Layout
+
+The project follows a modular, decoupled architecture using **aiogram 3** routers and persistent SQLite databases in WAL mode:
+
+```
+tg-downloader/
+├── bot.py                  # Application entry point: service setup, middleware, polling loop (~200 lines)
+├── config.py               # Environment variables, type parsing, and safety bounds
+│
+├── handlers/               # aiogram 3 domain routers
+│   ├── base.py             # Basic commands: /start, /help, /ping, /id
+│   ├── downloader.py       # Media pipeline: URL detection, queueing, cache delivery, file upload
+│   ├── dice.py             # Tabletop dice roller: /roll, /dmroll, inline queries
+│   ├── chatter.py          # Tavern chatterbot settings card and callbacks
+│   └── ai.py               # Munito AI: mentions, /ai settings, vision, group message router
+│
+├── downloader/             # Media extraction engine (yt-dlp wrappers and platform scrapers)
+│   ├── core.py             # MediaDownloaderCore (download, format selection, ffmpeg compression)
+│   ├── models.py           # Typed dataclasses (DownloadedMedia, MediaMetadata)
+│   └── platforms/          # Dedicated platform modules (TikTok, Pinterest, YouTube, Instagram)
+│
+├── services/               # Background business logic & database managers
+│   ├── cache.py            # SQLite URL -> file_id caching layer (media_cache.db)
+│   ├── worker.py           # Concurrency limiting, bounded task queues, and singleflight locks
+│   ├── dice.py             # D&D dice formula parser and roll engine
+│   ├── chatter.py          # Markov chain text generator & vocabulary trainer (chatter.db)
+│   └── munito.py           # Munito AI client, HTML parser, and token accounting (ai.db)
+│
+├── filters/                # Declarative message filters (admin, dice, media URLs, triggers)
+├── middlewares/            # Whitelist security middleware
+└── utils/                  # Cross-cutting utilities (typing action manager, photo downloader)
+```
+
+For complete architectural details, see [**docs/ARCHITECTURE.md**](docs/ARCHITECTURE.md).
 
 ---
 
@@ -150,6 +204,10 @@ To run the bot alongside the local Telegram Bot API server in Docker:
 | `COOKIES_FILE` | Optional | Path to a Netscape cookie file (e.g. `data/cookies.txt`). |
 | `MAX_CONCURRENT_DOWNLOADS` | Optional | Maximum simultaneous `yt-dlp` downloads (defaults to `2`). |
 | `MAX_CONCURRENT_TRANSCODES` | Optional | Maximum simultaneous `ffmpeg` transcoding tasks (defaults to `1`). |
+| `MUNITO_API_KEY` | Optional | Munito AI API key for Grok-style AI assistant features. |
+| `MUNITO_MODEL` | Optional | Model identifier (defaults to `deepseek-ai/deepseek-v4.1-flash-1017`). |
+| `MUNITO_BASE_URL` | Optional | Munito AI base URL (defaults to `https://api.munito.ai/inference/v1`). |
+| `MUNITO_SYSTEM_PROMPT` | Optional | Custom system instructions override for AI interactions. |
 
 ---
 
