@@ -1498,9 +1498,12 @@ async def _download_telegram_photo(bot: Bot, photo: PhotoSize) -> bytes | None:
             return None
 
         # 1. Direct local file check (e.g. shared volume with local telegram-bot-api)
-        local_candidate = Path(file_info.file_path)
-        if local_candidate.is_file():
-            return local_candidate.read_bytes()
+        try:
+            local_candidate = Path(file_info.file_path)
+            if local_candidate.is_file():
+                return local_candidate.read_bytes()
+        except (PermissionError, OSError) as perm_err:
+            logger.warning("Direct local photo read failed due to permissions/OS: %s", perm_err)
 
         # 2. Try standard aiogram download
         try:

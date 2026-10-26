@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: tg-downloader
     restart: unless-stopped
+    user: "root"
     env_file:
       - .env
     volumes:
