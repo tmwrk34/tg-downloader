@@ -678,12 +678,13 @@ async def ai_command_handler(message: Message, command: CommandObject):
             return
         elif subcmd in {"effort", "thinking", "reasoning"} and len(args) > 1:
             req_effort = args[1].lower()
-            if req_effort in {"low", "none", "high"}:
-                cfg = await munito_service.update_chat_config(chat_id, reasoning_effort=req_effort)
+            if req_effort in {"low", "none", "medium", "high"}:
+                eff = "low" if req_effort == "none" else req_effort
+                cfg = await munito_service.update_chat_config(chat_id, reasoning_effort=eff)
             else:
                 await message.reply(
                     "⚠️ Invalid thinking level. Choose one of: <code>low</code> (fast, ~15s), "
-                    "<code>none</code> (instant, ~3s), <code>high</code> (deep reasoning, ~90s).",
+                    "<code>medium</code> (balanced, ~35s), <code>high</code> (deep reasoning, ~90s).",
                     parse_mode="HTML",
                 )
                 return
