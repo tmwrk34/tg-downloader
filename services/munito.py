@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import html
 import logging
 import os
+import re
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -22,7 +25,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful, witty, and concise AI assistant in a Telegram group chat. "
-    "Format your answers clearly and respond in the language of the user's prompt (Ukrainian by default). "
+    "Format your answers clearly, be brief and direct, and avoid unnecessary filler or repetition. "
+    "Respond in the language of the user's prompt (Ukrainian by default). "
     "If analyzing an image or text from chat, be accurate and informative."
 )
 
@@ -35,6 +39,8 @@ AVAILABLE_MODELS = [
     "zai-org/glm-5.3-flash",
     "google/gemma-4-12b",
 ]
+
+REASONING_EFFORT_LEVELS = ["low", "none", "high"]
 
 
 def resolve_default_ai_db() -> str:
@@ -59,6 +65,7 @@ class AIChatConfig:
     enabled: bool = True
     model: str = DEFAULT_MODEL
     system_prompt: str | None = None
+    reasoning_effort: str = "low"
 
 
 @dataclass(frozen=True)
@@ -79,6 +86,15 @@ def get_next_model(current_model: str) -> str:
         return AVAILABLE_MODELS[0]
 
 
+def get_next_reasoning_effort(current_effort: str) -> str:
+    """Cycle reasoning effort levels: low -> none -> high -> low."""
+    try:
+        idx = REASONING_EFFORT_LEVELS.index(current_effort.lower())
+        return REASONING_EFFORT_LEVELS[(idx + 1) % len(REASONING_EFFORT_LEVELS)]
+    except ValueError:
+        return REASONING_EFFORT_LEVELS[0]
+
+
 def format_ai_card(
     chat_title: str,
     chat_id: int,
@@ -87,12 +103,19 @@ def format_ai_card(
 ) -> str:
     """Format AI assistant status, model, and token usage into an HTML message."""
     status_str = "🟢 Enabled" if cfg.enabled else "🔴 Disabled"
+    effort_labels = {
+        "low": "⚡ Low (Fast, ~15s)",
+        "none": "💨 None (Instant, ~3s)",
+        "high": "🧠 High (Deep CoT, ~90s)",
+    }
+    effort_display = effort_labels.get(cfg.reasoning_effort, cfg.reasoning_effort)
     return (
         f"🤖 <b>Munito AI Assistant Settings</b>\n"
         f"<b>Chat:</b> <code>{chat_title}</code> (<code>{chat_id}</code>)\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"⚡ <b>Status:</b> {status_str}\n"
         f"🧠 <b>Model:</b> <code>{cfg.model}</code>\n"
+        f"💭 <b>Thinking:</b> <code>{effort_display}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Token Usage:</b>\n"
         f"  • Total requests: <b>{stats.request_count:,}</b>\n"
@@ -121,6 +144,12 @@ def build_ai_keyboard(
             InlineKeyboardButton(
                 text=f"🧠 Model: {model_short}",
                 callback_data=f"ai:model:{chat_id}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=f"💭 Thinking: {cfg.reasoning_effort.title()}",
+                callback_data=f"ai:effort:{chat_id}",
             )
         ],
     ]
@@ -189,6 +218,78 @@ def split_telegram_message(text: str, max_chars: int = 4000) -> list[str]:
     return chunks
 
 
+def markdown_to_telegram_html(text: str) -> str:
+    """
+    Convert Markdown text from LLM completions into valid Telegram HTML format.
+    Safely escapes raw HTML characters outside of tags, formats code blocks,
+    inline code, bold, italic, strikethrough, links, and bullet points.
+    """
+    if not text:
+        return ""
+
+    # Placeholders for code blocks and inline code to prevent accidental markup collision
+    placeholders: list[str] = []
+
+    def save_placeholder(content: str) -> str:
+        idx = len(placeholders)
+        placeholders.append(content)
+        return f"\x00CODE{idx}\x00"
+
+    # 1. Protect code blocks: ```lang\ncode\n```
+    def replace_code_block(match: re.Match) -> str:
+        lang = match.group(1) or ""
+        code = match.group(2)
+        code_escaped = html.escape(code, quote=False)
+        if lang:
+            tag = f'<pre><code class="language-{html.escape(lang.strip(), quote=True)}">{code_escaped}</code></pre>'
+        else:
+            tag = f"<pre><code>{code_escaped}</code></pre>"
+        return save_placeholder(tag)
+
+    result = re.sub(r"```([a-zA-Z0-9_\-\+]*)\n?([\s\S]*?)```", replace_code_block, text)
+
+    # 2. Protect inline code: `code`
+    def replace_inline_code(match: re.Match) -> str:
+        code = match.group(1)
+        return save_placeholder(f"<code>{html.escape(code, quote=False)}</code>")
+
+    result = re.sub(r"`([^`\n]+)`", replace_inline_code, result)
+
+    # 3. Escape HTML characters in remaining text (&, <, >)
+    result = html.escape(result, quote=False)
+
+    # 4. Headers: # Title -> <b>Title</b>
+    result = re.sub(r"(?m)^#{1,6}\s+(.+)$", r"<b>\1</b>", result)
+
+    # 5. Bold: **text** or __text__
+    result = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", result)
+    result = re.sub(r"__(.+?)__", r"<b>\1</b>", result)
+
+    # 6. Italic: *text* or _text_
+    result = re.sub(r"(?<!\w)\*([^\*\n]+?)\*(?!\w)", r"<i>\1</i>", result)
+    result = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", result)
+
+    # 7. Strikethrough: ~~text~~
+    result = re.sub(r"~~(.+?)~~", r"<s>\1</s>", result)
+
+    # 8. Links: [label](url)
+    def replace_link(match: re.Match) -> str:
+        label = match.group(1)
+        url = match.group(2)
+        return f'<a href="{url}">{label}</a>'
+
+    result = re.sub(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)", replace_link, result)
+
+    # 9. List bullets: convert leading "- " or "* " to clean Unicode bullet "• "
+    result = re.sub(r"(?m)^[\*\-]\s+", "• ", result)
+
+    # 10. Restore code blocks and inline code
+    for idx, content in enumerate(placeholders):
+        result = result.replace(f"\x00CODE{idx}\x00", content)
+
+    return result
+
+
 class MunitoAIService:
     """Async client for Munito AI OpenAI-compatible chat completions with persistent config."""
 
@@ -247,10 +348,15 @@ class MunitoAIService:
                     chat_id INTEGER PRIMARY KEY,
                     enabled INTEGER NOT NULL DEFAULT 1,
                     model TEXT NOT NULL DEFAULT 'deepseek-ai/deepseek-v4.1-flash-1017',
-                    system_prompt TEXT
+                    system_prompt TEXT,
+                    reasoning_effort TEXT NOT NULL DEFAULT 'low'
                 )
                 """
             )
+            with contextlib.suppress(sqlite3.OperationalError):
+                self._conn.execute(
+                    "ALTER TABLE ai_chat_settings ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT 'low'"
+                )
 
             self._conn.execute(
                 """
@@ -272,25 +378,29 @@ class MunitoAIService:
 
             cursor = self._conn.cursor()
             cursor.execute(
-                "SELECT enabled, model, system_prompt FROM ai_chat_settings WHERE chat_id = ?",
+                "SELECT enabled, model, system_prompt, reasoning_effort FROM ai_chat_settings WHERE chat_id = ?",
                 (chat_id,),
             )
             row = cursor.fetchone()
             if row:
+                effort = str(row[3]) if len(row) > 3 and row[3] else "low"
                 cfg = AIChatConfig(
                     chat_id=chat_id,
                     enabled=bool(row[0]),
                     model=str(row[1]) if row[1] else self.default_model,
                     system_prompt=row[2],
+                    reasoning_effort=effort,
                 )
             else:
-                cfg = AIChatConfig(chat_id=chat_id, model=self.default_model)
+                cfg = AIChatConfig(
+                    chat_id=chat_id, model=self.default_model, reasoning_effort="low"
+                )
                 self._conn.execute(
                     """
-                    INSERT OR IGNORE INTO ai_chat_settings (chat_id, enabled, model, system_prompt)
-                    VALUES (?, ?, ?, ?)
+                    INSERT OR IGNORE INTO ai_chat_settings (chat_id, enabled, model, system_prompt, reasoning_effort)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    (chat_id, int(cfg.enabled), cfg.model, cfg.system_prompt),
+                    (chat_id, int(cfg.enabled), cfg.model, cfg.system_prompt, cfg.reasoning_effort),
                 )
                 self._conn.commit()
 
@@ -306,10 +416,10 @@ class MunitoAIService:
 
             self._conn.execute(
                 """
-                INSERT OR REPLACE INTO ai_chat_settings (chat_id, enabled, model, system_prompt)
-                VALUES (?, ?, ?, ?)
+                INSERT OR REPLACE INTO ai_chat_settings (chat_id, enabled, model, system_prompt, reasoning_effort)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (chat_id, int(cfg.enabled), cfg.model, cfg.system_prompt),
+                (chat_id, int(cfg.enabled), cfg.model, cfg.system_prompt, cfg.reasoning_effort),
             )
             self._conn.commit()
             self._config_cache[chat_id] = cfg
@@ -461,6 +571,10 @@ class MunitoAIService:
             "max_tokens": 2048,
             "stream": False,
         }
+
+        if "deepseek" in target_model.lower():
+            effort = cfg.reasoning_effort if chat_id is not None else "low"
+            payload["reasoning_effort"] = effort
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
