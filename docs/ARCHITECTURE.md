@@ -221,3 +221,4 @@ Deployment is completely automated via GitHub Actions on a **self-hosted Linux A
 - **Zero-Downtime Rebuild**: Runs `docker compose up -d --build` directly on the host.
 - **SQLite Database Preservation**: Backs up `data/*.db` to `/tmp/tg_bot_db_backup/` before git checkout and restores them post-checkout to ensure user settings and caches persist across code updates.
 - **Permission Alignment**: Both `bot` and `telegram-bot-api` services mount `bot_api_data:/var/lib/telegram-bot-api` to share media files without network overhead.
+

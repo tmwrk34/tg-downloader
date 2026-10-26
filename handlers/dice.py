@@ -15,9 +15,9 @@ from aiogram.types import (
     Message,
 )
 
-import bot
 from filters.dice import DiceFilter
 from services.dice import DiceParser, get_secret_roll, store_secret_roll
+from utils.proxy import bot_proxy as bot
 
 logger = logging.getLogger(__name__)
 

@@ -12,9 +12,9 @@ from aiogram.types import (
     Message,
 )
 
-import bot
 from filters.admin import is_chat_admin
 from services.chatter import ChatterConfig, ChatterStats
+from utils.proxy import bot_proxy as bot
 
 logger = logging.getLogger(__name__)
 
