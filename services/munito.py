@@ -572,9 +572,17 @@ class MunitoAIService:
             "stream": False,
         }
 
-        if "deepseek" in target_model.lower():
+        if "deepseek" in target_model.lower() or "qwen" in target_model.lower():
             effort = cfg.reasoning_effort if chat_id is not None else "low"
-            payload["reasoning_effort"] = effort
+            if effort == "none":
+                payload["chat_template_kwargs"] = {"enable_thinking": False, "thinking": False}
+                if messages and messages[0].get("role") == "system":
+                    messages[0]["content"] += (
+                        "\nRespond immediately and concisely without any chain of thought or internal thinking."
+                    )
+            else:
+                payload["reasoning_effort"] = effort
+                payload["chat_template_kwargs"] = {"enable_thinking": True, "thinking": True}
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -583,6 +591,7 @@ class MunitoAIService:
 
         url = f"{self.base_url}/chat/completions"
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
+        start_time = asyncio.get_event_loop().time()
 
         async with aiohttp.ClientSession(timeout=timeout) as session:
             try:
@@ -606,6 +615,8 @@ class MunitoAIService:
                         raise RuntimeError(f"Munito AI service error (HTTP {resp.status}).")
 
                     data = await resp.json()
+                    elapsed = asyncio.get_event_loop().time() - start_time
+                    logger.info("Munito AI responded in %.2fs (chat_id=%s)", elapsed, chat_id)
             except aiohttp.ClientError as err:
                 logger.error("Munito AI network connection error: %s", err)
                 raise RuntimeError(f"Failed to connect to Munito AI: {err}") from err
