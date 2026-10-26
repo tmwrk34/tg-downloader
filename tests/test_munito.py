@@ -1,9 +1,22 @@
+import datetime
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from aiogram.types import Message, User
+from aiogram.filters import CommandObject
+from aiogram.types import CallbackQuery, Chat, Message, User
 
-from services.munito import MunitoAIService, split_telegram_message
+from services.munito import (
+    AVAILABLE_MODELS,
+    DEFAULT_MODEL,
+    AIChatConfig,
+    AIChatStats,
+    MunitoAIService,
+    build_ai_keyboard,
+    format_ai_card,
+    get_next_model,
+    split_telegram_message,
+)
 
 
 def test_split_telegram_message():
@@ -310,4 +323,264 @@ async def test_handle_ai_mention_with_reply_text():
         assert kwargs["prompt"] == "explain this"
         assert kwargs["context_text"] == "Here is some code in python"
         assert kwargs["image_bytes"] is None
+        assert kwargs["chat_id"] == 12345
         assert msg.reply.call_args[0][0] == "Here is the explanation."
+
+
+@pytest.mark.asyncio
+async def test_munito_db_config_and_usage(tmp_path: Path):
+    db_file = tmp_path / "test_ai.db"
+    svc = MunitoAIService(api_key="test_key", db_path=db_file)
+
+    # 1. Default config
+    cfg = await svc.get_chat_config(1001)
+    assert cfg.chat_id == 1001
+    assert cfg.enabled is True
+    assert cfg.model == DEFAULT_MODEL
+
+    # 2. Update config
+    updated = await svc.update_chat_config(1001, enabled=False, model="qwen/qwen3.8-27b")
+    assert updated.enabled is False
+    assert updated.model == "qwen/qwen3.8-27b"
+
+    fetched = await svc.get_chat_config(1001)
+    assert fetched.enabled is False
+    assert fetched.model == "qwen/qwen3.8-27b"
+
+    # 3. Usage stats
+    stats_empty = await svc.get_chat_stats(1001)
+    assert stats_empty.request_count == 0
+    assert stats_empty.total_tokens == 0
+
+    # Record usage
+    stats1 = await svc.record_usage(1001, prompt_tokens=100, completion_tokens=50, total_tokens=150)
+    assert stats1.request_count == 1
+    assert stats1.prompt_tokens == 100
+    assert stats1.completion_tokens == 50
+    assert stats1.total_tokens == 150
+
+    # Record another usage
+    stats2 = await svc.record_usage(1001, prompt_tokens=50, completion_tokens=25, total_tokens=75)
+    assert stats2.request_count == 2
+    assert stats2.prompt_tokens == 150
+    assert stats2.completion_tokens == 75
+    assert stats2.total_tokens == 225
+
+    # 4. Reset stats
+    await svc.reset_chat_stats(1001)
+    stats_reset = await svc.get_chat_stats(1001)
+    assert stats_reset.request_count == 0
+    assert stats_reset.total_tokens == 0
+
+    svc.close()
+
+
+def test_munito_models_and_cards():
+    assert len(AVAILABLE_MODELS) >= 3
+    assert DEFAULT_MODEL == AVAILABLE_MODELS[0]
+
+    # Model cycling
+    m1 = AVAILABLE_MODELS[0]
+    m2 = get_next_model(m1)
+    assert m2 == AVAILABLE_MODELS[1]
+    last_m = AVAILABLE_MODELS[-1]
+    assert get_next_model(last_m) == AVAILABLE_MODELS[0]
+    assert get_next_model("unknown/model") == AVAILABLE_MODELS[0]
+
+    # Format card
+    cfg = AIChatConfig(chat_id=123, enabled=True, model=DEFAULT_MODEL)
+    stats = AIChatStats(
+        chat_id=123, request_count=5, prompt_tokens=500, completion_tokens=200, total_tokens=700
+    )
+    card = format_ai_card("D&D Chat", 123, cfg, stats)
+    assert "Налаштування Munito AI Асистента" in card
+    assert "🟢 Увімкнено" in card
+    assert DEFAULT_MODEL in card
+    assert "700" in card
+
+    # Build keyboard
+    kb = build_ai_keyboard(123, cfg)
+    assert any("Вимкнути" in btn.text for row in kb.inline_keyboard for btn in row)
+    assert any(
+        DEFAULT_MODEL.split("/")[-1] in btn.text for row in kb.inline_keyboard for btn in row
+    )
+
+    kb_confirm = build_ai_keyboard(123, cfg, confirm_reset=True)
+    assert any(
+        "Підтвердити скидання" in btn.text for row in kb_confirm.inline_keyboard for btn in row
+    )
+
+
+@pytest.mark.asyncio
+async def test_munito_command_and_callback_handlers(tmp_path: Path):
+    from bot import (
+        ai_callback_handler,
+        ai_command_handler,
+    )
+
+    # Use a temporary DB for tests
+    test_svc = MunitoAIService(api_key="valid_key", db_path=tmp_path / "bot_ai.db")
+    chat_id = -100555666
+    chat = Chat(id=chat_id, type="supergroup", title="AI Test Tavern")
+    user = User(id=98765, is_bot=False, first_name="AdminPlayer")
+
+    bot = MagicMock()
+    bot.get_me = AsyncMock(
+        return_value=User(id=999999, is_bot=True, first_name="BardBot", username="bard_bot")
+    )
+    member_mock = MagicMock()
+    member_mock.status = "administrator"
+    bot.get_chat_member = AsyncMock(return_value=member_mock)
+
+    msg = Message(
+        message_id=1,
+        date=datetime.datetime.now(datetime.UTC),
+        chat=chat,
+        from_user=user,
+        text="/ai",
+    ).as_(bot)
+
+    with patch("bot.munito_service", test_svc):
+        # 1. /ai without args shows card
+        with patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply:
+            await ai_command_handler(msg, CommandObject(prefix="/", command="ai", args=""))
+            assert mock_reply.call_count == 1
+            card_text = mock_reply.call_args[0][0]
+            assert "Налаштування Munito AI Асистента" in card_text
+            assert "🟢 Увімкнено" in card_text
+
+        # 2. /ai off
+        with patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply:
+            await ai_command_handler(msg, CommandObject(prefix="/", command="ai", args="off"))
+            assert mock_reply.call_count == 1
+            cfg = await test_svc.get_chat_config(chat_id)
+            assert cfg.enabled is False
+
+        # 3. /ai on
+        with patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply:
+            await ai_command_handler(msg, CommandObject(prefix="/", command="ai", args="on"))
+            assert mock_reply.call_count == 1
+            cfg = await test_svc.get_chat_config(chat_id)
+            assert cfg.enabled is True
+
+        # 4. /ai model qwen3.8-27b
+        with patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply:
+            await ai_command_handler(
+                msg, CommandObject(prefix="/", command="ai", args="model qwen3.8-27b")
+            )
+            assert mock_reply.call_count == 1
+            cfg = await test_svc.get_chat_config(chat_id)
+            assert cfg.model == "qwen/qwen3.8-27b"
+
+        # 5. /ai models
+        with patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply:
+            await ai_command_handler(msg, CommandObject(prefix="/", command="ai", args="models"))
+            assert mock_reply.call_count == 1
+            models_text = mock_reply.call_args[0][0]
+            assert "Доступні моделі Munito AI" in models_text
+            assert "deepseek-ai/deepseek-v4.1-flash-1017" in models_text
+
+        # 6. /ai reset
+        await test_svc.record_usage(chat_id, 10, 20, 30)
+        with patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply:
+            await ai_command_handler(msg, CommandObject(prefix="/", command="ai", args="reset"))
+            assert mock_reply.call_count == 1
+            assert "Статистику токенів скинуто!" in mock_reply.call_args[0][0]
+            stats = await test_svc.get_chat_stats(chat_id)
+            assert stats.request_count == 0
+
+        # 7. Callbacks
+        cb_msg = Message(
+            message_id=2,
+            date=datetime.datetime.now(datetime.UTC),
+            chat=chat,
+            from_user=user,
+            text="AI status card",
+        ).as_(bot)
+
+        # Toggle callback
+        cb_toggle = CallbackQuery(
+            id="cb_tog",
+            from_user=user,
+            chat_instance="ci1",
+            data=f"ai:toggle:{chat_id}",
+            message=cb_msg,
+        ).as_(bot)
+
+        with (
+            patch.object(CallbackQuery, "answer", new_callable=AsyncMock) as mock_cb_answer,
+            patch.object(Message, "edit_text", new_callable=AsyncMock) as mock_edit,
+        ):
+            await ai_callback_handler(cb_toggle)
+            assert mock_cb_answer.call_count == 1
+            assert mock_edit.call_count == 1
+            cfg = await test_svc.get_chat_config(chat_id)
+            assert cfg.enabled is False
+
+        # Model callback
+        cb_model = CallbackQuery(
+            id="cb_mod",
+            from_user=user,
+            chat_instance="ci2",
+            data=f"ai:model:{chat_id}",
+            message=cb_msg,
+        ).as_(bot)
+
+        with (
+            patch.object(CallbackQuery, "answer", new_callable=AsyncMock) as mock_cb_answer,
+            patch.object(Message, "edit_text", new_callable=AsyncMock) as mock_edit,
+        ):
+            await ai_callback_handler(cb_model)
+            assert mock_cb_answer.call_count == 1
+            assert mock_edit.call_count == 1
+            cfg = await test_svc.get_chat_config(chat_id)
+            assert cfg.model != "qwen/qwen3.8-27b"
+
+    test_svc.close()
+
+
+@pytest.mark.asyncio
+async def test_munito_generate_reply_with_chat_id_and_token_tracking(tmp_path: Path):
+    db_file = tmp_path / "test_track.db"
+    svc = MunitoAIService(api_key="test_key", db_path=db_file)
+    chat_id = 998877
+
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "Відповідь з підрахунком токенів.",
+                }
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 12,
+            "completion_tokens": 8,
+            "total_tokens": 20,
+        },
+    }
+    mock_resp.__aenter__.return_value = mock_resp
+
+    mock_session = AsyncMock()
+    mock_session.post = MagicMock(return_value=mock_resp)
+    mock_session.__aenter__.return_value = mock_session
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        reply = await svc.generate_reply("Привіт", chat_id=chat_id)
+        assert reply == "Відповідь з підрахунком токенів."
+
+        stats = await svc.get_chat_stats(chat_id)
+        assert stats.request_count == 1
+        assert stats.prompt_tokens == 12
+        assert stats.completion_tokens == 8
+        assert stats.total_tokens == 20
+
+    # When disabled, should raise RuntimeError
+    await svc.update_chat_config(chat_id, enabled=False)
+    with pytest.raises(RuntimeError, match="AI асистент вимкнено"):
+        await svc.generate_reply("Привіт знову", chat_id=chat_id)
+
+    svc.close()
