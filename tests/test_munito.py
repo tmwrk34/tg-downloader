@@ -691,3 +691,43 @@ async def test_munito_generate_reply_with_chat_id_and_token_tracking(tmp_path: P
         await svc.generate_reply("Привіт знову", chat_id=chat_id)
 
     svc.close()
+
+
+def test_select_optimal_photo():
+    from utils.telegram_media import select_optimal_photo
+
+    p1 = MagicMock(width=90, height=90)
+    p2 = MagicMock(width=320, height=240)
+    p3 = MagicMock(width=800, height=600)
+    p4 = MagicMock(width=4000, height=3000)
+
+    # When 4 sizes exist, should pick p3 (<= 1280px, largest available)
+    assert select_optimal_photo([p1, p2, p3, p4]) is p3
+
+    # When only 2 sizes exist, picks the last one
+    assert select_optimal_photo([p1, p2]) is p2
+
+    # When all sizes are large (>1280px), picks second-to-largest
+    big1 = MagicMock(width=2000, height=1500)
+    big2 = MagicMock(width=4000, height=3000)
+    big3 = MagicMock(width=6000, height=4500)
+    assert select_optimal_photo([big1, big2, big3]) is big2
+
+
+@pytest.mark.asyncio
+async def test_munito_generate_reply_timeout():
+    svc = MunitoAIService(api_key="test_key", db_path=":memory:")
+
+    post_cm = MagicMock()
+    post_cm.__aenter__.side_effect = TimeoutError()
+    post_cm.__aexit__.return_value = None
+
+    mock_session = AsyncMock()
+    mock_session.post = MagicMock(return_value=post_cm)
+    mock_session.__aenter__.return_value = mock_session
+
+    with patch("aiohttp.ClientSession", return_value=mock_session):
+        with pytest.raises(RuntimeError, match="timed out"):
+            await svc.generate_reply("Test timeout")
+
+    svc.close()

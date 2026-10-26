@@ -11,6 +11,22 @@ from aiogram.types import PhotoSize
 logger = logging.getLogger(__name__)
 
 
+def select_optimal_photo(photos: list[PhotoSize]) -> PhotoSize:
+    """
+    Select the optimal PhotoSize for vision LLM inference.
+    Prefers standard dimensions (<= 1280px) to prevent multi-megabyte payloads
+    and long inference timeouts on mobile/broadband connections.
+    """
+    if not photos:
+        raise ValueError("Photo list is empty")
+    if len(photos) <= 2:
+        return photos[-1]
+    suitable = [p for p in photos if max(getattr(p, "width", 0), getattr(p, "height", 0)) <= 1280]
+    if suitable:
+        return max(suitable, key=lambda p: max(getattr(p, "width", 0), getattr(p, "height", 0)))
+    return photos[-2]
+
+
 async def download_telegram_photo(active_bot: Bot, photo: PhotoSize) -> bytes | None:
     """Download photo bytes safely, supporting direct local filesystem access and HTTP fallback."""
     try:
