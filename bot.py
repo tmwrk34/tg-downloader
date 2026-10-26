@@ -4,8 +4,10 @@ import logging
 import re
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
+import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
@@ -28,6 +30,7 @@ from aiogram.types import (
     InputRichMessage,
     InputTextMessageContent,
     Message,
+    PhotoSize,
     RichBlockCaption,
 )
 
@@ -634,7 +637,7 @@ async def ai_command_handler(message: Message, command: CommandObject):
     chat_title = message.chat.title or message.chat.first_name or "Private Chat"
 
     if not await _is_user_chatter_admin(message.bot, chat_id, user_id):
-        await message.reply("⚠️ Тільки адміністратори чату можуть налаштовувати AI асистента.")
+        await message.reply("⚠️ Only chat administrators can configure the AI assistant.")
         return
 
     args = (command.args or "").strip().split()
@@ -658,16 +661,16 @@ async def ai_command_handler(message: Message, command: CommandObject):
             else:
                 models_list = "\n".join(f"• <code>{m}</code>" for m in AVAILABLE_MODELS)
                 await message.reply(
-                    f"⚠️ Невідома модель: <code>{req_model}</code>.\nДоступні моделі:\n{models_list}",
+                    f"⚠️ Unknown model: <code>{req_model}</code>.\nAvailable models:\n{models_list}",
                     parse_mode="HTML",
                 )
                 return
         elif subcmd in {"models", "моделі"}:
             models_list = "\n".join(f"• <code>{m}</code>" for m in AVAILABLE_MODELS)
             await message.reply(
-                f"🧠 <b>Доступні моделі Munito AI:</b>\n{models_list}\n\n"
-                f"Поточна: <code>{cfg.model}</code>\n"
-                f"Змінити: <code>/ai model &lt;назва&gt;</code> або через інлайн-кнопки.",
+                f"🧠 <b>Available Munito AI models:</b>\n{models_list}\n\n"
+                f"Current: <code>{cfg.model}</code>\n"
+                f"Change: <code>/ai model &lt;name&gt;</code> or use the inline buttons.",
                 parse_mode="HTML",
             )
             return
@@ -677,7 +680,7 @@ async def ai_command_handler(message: Message, command: CommandObject):
             text = format_ai_card(chat_title, chat_id, cfg, stats)
             keyboard = build_ai_keyboard(chat_id, cfg)
             await message.reply(
-                "🧹 <b>Статистику токенів скинуто!</b>\n\n" + text,
+                "🧹 <b>Token usage statistics reset!</b>\n\n" + text,
                 reply_markup=keyboard,
                 parse_mode="HTML",
             )
@@ -707,7 +710,7 @@ async def ai_callback_handler(callback: CallbackQuery):
     user_id = callback.from_user.id if callback.from_user else 0
     if not await _is_user_chatter_admin(callback.bot, target_chat_id, user_id):
         await callback.answer(
-            "⚠️ Тільки адміністратори чату можуть змінювати налаштування AI.",
+            "⚠️ Only chat administrators can modify AI settings.",
             show_alert=True,
         )
         return
@@ -717,19 +720,19 @@ async def ai_callback_handler(callback: CallbackQuery):
 
     if action == "toggle":
         cfg = await munito_service.update_chat_config(target_chat_id, enabled=not cfg.enabled)
-        await callback.answer(f"Статус AI: {'Увімкнено' if cfg.enabled else 'Вимкнено'}")
+        await callback.answer(f"AI Status: {'Enabled' if cfg.enabled else 'Disabled'}")
     elif action == "model":
         next_m = get_next_model(cfg.model)
         cfg = await munito_service.update_chat_config(target_chat_id, model=next_m)
-        await callback.answer(f"Модель: {next_m.split('/')[-1]}")
+        await callback.answer(f"Model: {next_m.split('/')[-1]}")
     elif action == "reset_prompt":
         confirm_reset = True
         await callback.answer()
     elif action == "reset_confirm":
         await munito_service.reset_chat_stats(target_chat_id)
-        await callback.answer("Статистику токенів скинуто!", show_alert=True)
+        await callback.answer("Token statistics have been reset!", show_alert=True)
     elif action == "refresh":
-        await callback.answer("Оновлено!")
+        await callback.answer("Refreshed!")
 
     target_msg = callback.message if isinstance(callback.message, Message) else None
     if target_msg:
@@ -822,8 +825,8 @@ async def inline_dice_handler(inline_query: InlineQuery):
         results.append(
             InlineQueryResultArticle(
                 id=f"ai_{uuid.uuid4().hex[:8]}",
-                title=f"🤖 Запитати AI: {query[:45]}",
-                description=f"Надіслати '{query}' боту в чат",
+                title=f"🤖 Ask AI: {query[:45]}",
+                description=f"Send '{query}' to bot in chat",
                 input_message_content=InputTextMessageContent(
                     message_text=f"{bot_tag}{query}",
                 ),
@@ -1487,11 +1490,51 @@ async def _extract_bot_tag_prompt(message: Message, bot: Bot) -> tuple[bool, str
     return True, cleaned_prompt
 
 
+async def _download_telegram_photo(bot: Bot, photo: PhotoSize) -> bytes | None:
+    """Download photo bytes safely, supporting direct local filesystem access and HTTP fallback."""
+    try:
+        file_info = await bot.get_file(photo.file_id)
+        if not file_info.file_path:
+            return None
+
+        # 1. Direct local file check (e.g. shared volume with local telegram-bot-api)
+        local_candidate = Path(file_info.file_path)
+        if local_candidate.is_file():
+            return local_candidate.read_bytes()
+
+        # 2. Try standard aiogram download
+        try:
+            file_io = await bot.download(file_info)
+            if file_io:
+                return file_io.getvalue() if hasattr(file_io, "getvalue") else file_io.read()
+        except Exception as dl_err:
+            logger.debug("Standard bot.download failed: %s", dl_err)
+
+        # 3. If running with local_bot_api, extract relative path from absolute path
+        if config.local_bot_api_url:
+            rel_path = file_info.file_path.lstrip("/")
+            for marker in ("photos/", "documents/", "video/", "voice/", "video_notes/"):
+                if marker in rel_path:
+                    rel_path = rel_path[rel_path.index(marker) :]
+                    break
+            download_url = f"{config.local_bot_api_url.rstrip('/')}/file/bot{bot.token}/{rel_path}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(download_url) as resp:
+                    if resp.status == 200:
+                        return await resp.read()
+                    logger.warning(
+                        "Local bot API photo fetch returned %s for %s", resp.status, download_url
+                    )
+    except Exception as e:
+        logger.warning("Failed to download photo for Munito AI: %s", e)
+    return None
+
+
 async def _handle_ai_mention(message: Message, prompt: str, bot: Bot) -> None:
     """Handle explicit @bot_username tag using Munito AI with text or vision context."""
     if not munito_service.is_configured:
         await message.reply(
-            "⚠️ Munito AI не налаштовано на сервері (відсутній <code>MUNITO_API_KEY</code>).",
+            "⚠️ Munito AI is not configured on the server (missing <code>MUNITO_API_KEY</code>).",
             parse_mode="HTML",
         )
         return
@@ -1503,32 +1546,17 @@ async def _handle_ai_mention(message: Message, prompt: str, bot: Bot) -> None:
     if message.reply_to_message:
         replied = message.reply_to_message
         if replied.photo:
-            try:
-                largest_photo = replied.photo[-1]
-                file_io = await bot.download(largest_photo)
-                if file_io:
-                    image_bytes = (
-                        file_io.getvalue() if hasattr(file_io, "getvalue") else file_io.read()
-                    )
-            except Exception as e:
-                logger.warning("Failed to download replied photo for Munito AI: %s", e)
-
+            image_bytes = await _download_telegram_photo(bot, replied.photo[-1])
             if replied.caption:
                 context_text = replied.caption
         elif replied.text:
             context_text = replied.text
     elif message.photo:
-        try:
-            largest_photo = message.photo[-1]
-            file_io = await bot.download(largest_photo)
-            if file_io:
-                image_bytes = file_io.getvalue() if hasattr(file_io, "getvalue") else file_io.read()
-        except Exception as e:
-            logger.warning("Failed to download attached photo for Munito AI: %s", e)
+        image_bytes = await _download_telegram_photo(bot, message.photo[-1])
 
     if not prompt and not context_text and not image_bytes:
         await message.reply(
-            "Привіт! Я підключений до моделі штучного інтелекту. Запитай мене щось або тегни у відповіді на повідомлення чи зображення.",
+            "Hello! I am connected to an AI model. Ask me a question or tag me in reply to a message or photo.",
         )
         return
 
@@ -1554,10 +1582,16 @@ async def _handle_ai_mention(message: Message, prompt: str, bot: Bot) -> None:
             image_bytes=image_bytes,
             chat_id=message.chat.id,
         )
+    except TimeoutError:
+        logger.exception("Munito AI generation timed out")
+        await set_message_reaction(message, "❌")
+        await message.reply("❌ AI Error: Request timed out while waiting for model response.")
+        return
     except Exception as e:
         logger.exception("Munito AI generation failed")
         await set_message_reaction(message, "❌")
-        await message.reply(f"❌ Помилка AI: {e}")
+        err_msg = str(e).strip() or type(e).__name__
+        await message.reply(f"❌ AI Error: {err_msg}")
         return
     finally:
         stop_typing.set()

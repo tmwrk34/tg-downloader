@@ -86,21 +86,21 @@ def format_ai_card(
     stats: AIChatStats,
 ) -> str:
     """Format AI assistant status, model, and token usage into an HTML message."""
-    status_str = "🟢 Увімкнено (Enabled)" if cfg.enabled else "🔴 Вимкнено (Disabled)"
+    status_str = "🟢 Enabled" if cfg.enabled else "🔴 Disabled"
     return (
-        f"🤖 <b>Налаштування Munito AI Асистента</b>\n"
-        f"<b>Чат:</b> <code>{chat_title}</code> (<code>{chat_id}</code>)\n"
+        f"🤖 <b>Munito AI Assistant Settings</b>\n"
+        f"<b>Chat:</b> <code>{chat_title}</code> (<code>{chat_id}</code>)\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ <b>Статус:</b> {status_str}\n"
-        f"🧠 <b>Модель:</b> <code>{cfg.model}</code>\n"
+        f"⚡ <b>Status:</b> {status_str}\n"
+        f"🧠 <b>Model:</b> <code>{cfg.model}</code>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Використання токенів:</b>\n"
-        f"  • Всього запитів: <b>{stats.request_count:,}</b>\n"
-        f"  • Промпт токенів: <b>{stats.prompt_tokens:,}</b>\n"
-        f"  • Згенеровано токенів: <b>{stats.completion_tokens:,}</b>\n"
-        f"  • Загалом токенів: <b>{stats.total_tokens:,}</b>\n"
+        f"📊 <b>Token Usage:</b>\n"
+        f"  • Total requests: <b>{stats.request_count:,}</b>\n"
+        f"  • Prompt tokens: <b>{stats.prompt_tokens:,}</b>\n"
+        f"  • Generated tokens: <b>{stats.completion_tokens:,}</b>\n"
+        f"  • Total tokens: <b>{stats.total_tokens:,}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Викликається виключно через тег бота: @bot &lt;запит&gt;</i>"
+        f"<i>Triggered exclusively via bot tag: @bot &lt;prompt&gt;</i>"
     )
 
 
@@ -108,18 +108,18 @@ def build_ai_keyboard(
     chat_id: int, cfg: AIChatConfig, confirm_reset: bool = False
 ) -> InlineKeyboardMarkup:
     """Construct inline keyboard for AI configuration."""
-    toggle_text = "🔴 Вимкнути" if cfg.enabled else "🟢 Увімкнути"
+    toggle_text = "🔴 Disable" if cfg.enabled else "🟢 Enable"
     model_short = cfg.model.split("/")[-1]
     rows = [
         [
             InlineKeyboardButton(
-                text=f"Статус: {toggle_text}",
+                text=f"Status: {toggle_text}",
                 callback_data=f"ai:toggle:{chat_id}",
             )
         ],
         [
             InlineKeyboardButton(
-                text=f"🧠 Модель: {model_short}",
+                text=f"🧠 Model: {model_short}",
                 callback_data=f"ai:model:{chat_id}",
             )
         ],
@@ -129,11 +129,11 @@ def build_ai_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="⚠️ Підтвердити скидання",
+                    text="⚠️ Confirm Reset",
                     callback_data=f"ai:reset_confirm:{chat_id}",
                 ),
                 InlineKeyboardButton(
-                    text="❌ Скасувати",
+                    text="❌ Cancel",
                     callback_data=f"ai:refresh:{chat_id}",
                 ),
             ]
@@ -142,7 +142,7 @@ def build_ai_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="🧹 Скинути лічильник токенів",
+                    text="🧹 Reset Token Stats",
                     callback_data=f"ai:reset_prompt:{chat_id}",
                 )
             ]
@@ -151,7 +151,7 @@ def build_ai_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
-                text="🔄 Оновити",
+                text="🔄 Refresh",
                 callback_data=f"ai:refresh:{chat_id}",
             )
         ]
@@ -198,12 +198,15 @@ class MunitoAIService:
         model: str = DEFAULT_MODEL,
         base_url: str = "https://api.munito.ai/inference/v1",
         system_prompt: str | None = None,
-        timeout_seconds: float = 60.0,
+        timeout_seconds: float = 120.0,
         db_path: str | Path | None = None,
     ) -> None:
         self.api_key = api_key
         self.default_model = model
-        self.base_url = base_url.rstrip("/")
+        clean_base = (base_url or "https://api.munito.ai/inference/v1").strip().rstrip("/")
+        if clean_base.endswith("/chat/completions"):
+            clean_base = clean_base.removesuffix("/chat/completions").rstrip("/")
+        self.base_url = clean_base
         self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         self.timeout_seconds = timeout_seconds
 
@@ -413,7 +416,7 @@ class MunitoAIService:
         if chat_id is not None:
             cfg = await self.get_chat_config(chat_id)
             if not cfg.enabled:
-                raise RuntimeError("AI асистент вимкнено для цього чату адміністратором.")
+                raise RuntimeError("AI assistant is disabled for this chat by administrator.")
             if not model:
                 target_model = cfg.model
             if cfg.system_prompt:
@@ -426,14 +429,12 @@ class MunitoAIService:
         # If user referenced previous text from another message
         full_text_prompt = ""
         if context_text and context_text.strip():
-            full_text_prompt += (
-                f"[Повідомлення з чату, на яке посилається користувач]:\n{context_text.strip()}\n\n"
-            )
+            full_text_prompt += f"[Referenced chat message]:\n{context_text.strip()}\n\n"
 
         if prompt and prompt.strip():
             full_text_prompt += prompt.strip()
         elif not image_bytes:
-            full_text_prompt += "Поясни або дай відповідь на це повідомлення."
+            full_text_prompt += "Explain or reply to this message."
 
         if full_text_prompt:
             user_content.append({"type": "text", "text": full_text_prompt})
@@ -450,14 +451,15 @@ class MunitoAIService:
             )
 
         if not user_content:
-            return "Не вказано запитання чи повідомлення для відповіді."
+            return "No prompt or message was provided to answer."
 
         messages.append({"role": "user", "content": user_content})
 
-        payload = {
+        payload: dict[str, Any] = {
             "model": target_model,
             "messages": messages,
             "max_tokens": 2048,
+            "stream": False,
         }
 
         headers = {
@@ -473,30 +475,30 @@ class MunitoAIService:
                 async with session.post(url, json=payload, headers=headers) as resp:
                     if resp.status == 401:
                         logger.error("Munito AI error: 401 Unauthorized (invalid API key)")
-                        raise RuntimeError("Невірний або недійсний ключ Munito AI (HTTP 401).")
+                        raise RuntimeError("Invalid or unauthorized Munito API key (HTTP 401).")
                     if resp.status == 429:
                         logger.warning("Munito AI error: 429 Rate limit exceeded")
                         raise RuntimeError(
-                            "Перевищено ліміт запитів до Munito AI. Зачекайте хвилинку."
+                            "Munito AI rate limit reached. Please wait a minute before retrying."
                         )
                     if resp.status == 503:
                         logger.warning("Munito AI error: 503 Service unavailable / no capacity")
                         raise RuntimeError(
-                            "Модель зараз перевантажена на сервері Munito. Спробуйте пізніше."
+                            "The model is currently overloaded on Munito servers. Please try again later."
                         )
                     if resp.status >= 400:
                         err_body = await resp.text()
                         logger.error("Munito AI error HTTP %d: %s", resp.status, err_body)
-                        raise RuntimeError(f"Помилка сервісу Munito AI (HTTP {resp.status}).")
+                        raise RuntimeError(f"Munito AI service error (HTTP {resp.status}).")
 
                     data = await resp.json()
             except aiohttp.ClientError as err:
                 logger.error("Munito AI network connection error: %s", err)
-                raise RuntimeError(f"Не вдалося з'єднатися з Munito AI: {err}") from err
+                raise RuntimeError(f"Failed to connect to Munito AI: {err}") from err
 
         choices = data.get("choices") or []
         if not choices:
-            raise RuntimeError("Munito AI повернув порожню відповідь.")
+            raise RuntimeError("Munito AI returned an empty response.")
 
         # Record token metrics
         if chat_id is not None:
@@ -514,6 +516,6 @@ class MunitoAIService:
             content = message_obj["reasoning"]
 
         if not content or not str(content).strip():
-            return "<i>(Модель повернула порожню відповідь)</i>"
+            return "<i>(Model returned an empty response)</i>"
 
         return str(content).strip()
