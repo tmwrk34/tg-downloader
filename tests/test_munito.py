@@ -9,6 +9,7 @@ from aiogram.types import CallbackQuery, Chat, Message, User
 from services.munito import (
     AVAILABLE_MODELS,
     DEFAULT_MODEL,
+    DEFAULT_SYSTEM_PROMPT,
     AIChatConfig,
     AIChatStats,
     MunitoAIService,
@@ -92,6 +93,14 @@ def test_munito_is_configured():
 
     svc_valid = MunitoAIService(api_key="munitoai_testkey123")
     assert svc_valid.is_configured
+
+
+def test_default_system_prompt_language_rule():
+    assert "Ukrainian by default" not in DEFAULT_SYSTEM_PROMPT
+    assert "Always respond in the exact same language" in DEFAULT_SYSTEM_PROMPT
+    assert "Russian" in DEFAULT_SYSTEM_PROMPT
+    assert "Ukrainian" in DEFAULT_SYSTEM_PROMPT
+    assert "English" in DEFAULT_SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio

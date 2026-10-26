@@ -27,7 +27,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful, witty, and concise AI assistant in a Telegram group chat. "
     "Format your answers clearly, be brief and direct, and avoid unnecessary filler or repetition. "
-    "Respond in the language of the user's prompt (Ukrainian by default). "
+    "Always respond in the exact same language as the user's current prompt or message "
+    "(e.g., if asked in Ukrainian, reply in Ukrainian; if asked in Russian, reply in Russian; "
+    "if asked in English, reply in English). "
     "If analyzing an image or text from chat, be accurate and informative."
 )
 
