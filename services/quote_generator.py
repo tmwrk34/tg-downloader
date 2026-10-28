@@ -747,39 +747,47 @@ class QuoteGeneratorService:
             stamp_x = int(author_origin_x + 60)
             stamp_y = int(author_base_y + 35)
 
-        # 3. MULTI-LAYER PHYSICAL DROP SHADOWS ONTO PARCHMENT
+        # 3. MULTI-LAYER PHYSICAL DROP SHADOWS ONTO PARCHMENT (WITH SEAMLESS PADDING)
+        sh_pad = 90
+        sh_dim = stamp_size + sh_pad * 2
         wax_alpha = np.array(seal_img)[:, :, 3].astype(np.float32) / 255.0
 
-        # Diffuse ambient penumbra shadow
-        pen_mask = Image.fromarray((wax_alpha * 95).astype(np.uint8), mode="L").filter(
+        padded_wax = np.zeros((sh_dim, sh_dim), dtype=np.float32)
+        padded_wax[sh_pad : sh_pad + stamp_size, sh_pad : sh_pad + stamp_size] = wax_alpha
+
+        base_sh_x = stamp_x - sh_pad
+        base_sh_y = stamp_y - sh_pad
+
+        # A. Diffuse ambient penumbra shadow (soft warm brown, seamlessly fades to zero)
+        pen_mask = Image.fromarray((padded_wax * 85).astype(np.uint8), mode="L").filter(
             ImageFilter.GaussianBlur(32)
         )
         pen_sh = Image.new("RGBA", (self.canvas_w, self.canvas_h), (0, 0, 0, 0))
         pen_sh.paste(
-            Image.new("RGBA", seal_img.size, (28, 18, 12, 255)),
-            (stamp_x + 24, stamp_y + 36),
+            Image.new("RGBA", (sh_dim, sh_dim), (28, 18, 12, 255)),
+            (base_sh_x + 22, base_sh_y + 32),
             pen_mask,
         )
 
-        # Directional body shadow (falling down-right)
-        body_mask = Image.fromarray((wax_alpha * 165).astype(np.uint8), mode="L").filter(
+        # B. Directional body shadow (falling down-right)
+        body_mask = Image.fromarray((padded_wax * 155).astype(np.uint8), mode="L").filter(
             ImageFilter.GaussianBlur(16)
         )
         body_sh = Image.new("RGBA", (self.canvas_w, self.canvas_h), (0, 0, 0, 0))
         body_sh.paste(
-            Image.new("RGBA", seal_img.size, (18, 12, 8, 255)),
-            (stamp_x + 14, stamp_y + 22),
+            Image.new("RGBA", (sh_dim, sh_dim), (18, 12, 8, 255)),
+            (base_sh_x + 14, base_sh_y + 20),
             body_mask,
         )
 
-        # Deep contact occlusion right under the wax edge
-        contact_mask = Image.fromarray((wax_alpha * 210).astype(np.uint8), mode="L").filter(
+        # C. Deep contact occlusion right under the wax edge
+        contact_mask = Image.fromarray((padded_wax * 210).astype(np.uint8), mode="L").filter(
             ImageFilter.GaussianBlur(4)
         )
         contact_sh = Image.new("RGBA", (self.canvas_w, self.canvas_h), (0, 0, 0, 0))
         contact_sh.paste(
-            Image.new("RGBA", seal_img.size, (10, 6, 4, 255)),
-            (stamp_x + 3, stamp_y + 4),
+            Image.new("RGBA", (sh_dim, sh_dim), (10, 6, 4, 255)),
+            (base_sh_x + 3, base_sh_y + 4),
             contact_mask,
         )
 
