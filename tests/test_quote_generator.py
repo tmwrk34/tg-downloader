@@ -5,7 +5,7 @@ import io
 import pytest
 from PIL import Image
 
-from services.quote_generator import MEDIEVAL_PALETTE, QuoteGeneratorService
+from services.quote_generator import NOBLE_PAIRS, QuoteGeneratorService
 
 
 @pytest.fixture
@@ -19,33 +19,38 @@ def test_quote_service_init(quote_service: QuoteGeneratorService):
     assert len(quote_service.TEMPLATES) == 5
 
 
-def test_dominant_color_fallback(quote_service: QuoteGeneratorService):
-    col = quote_service.extract_dominant_color(None, "Test Author")
-    assert isinstance(col, tuple)
-    assert len(col) == 3
-    assert col in MEDIEVAL_PALETTE
+def test_noble_colors_fallback(quote_service: QuoteGeneratorService):
+    base_col, powder_col = quote_service.extract_noble_colors(None, "Test Author")
+    assert isinstance(base_col, tuple)
+    assert len(base_col) == 3
+    assert (base_col, powder_col) in NOBLE_PAIRS
 
 
-def test_dominant_color_from_avatar(quote_service: QuoteGeneratorService):
+def test_noble_colors_from_avatar(quote_service: QuoteGeneratorService):
     # Create a small saturated blue test avatar
     img = Image.new("RGB", (64, 64), (20, 60, 200))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     avatar_bytes = buf.getvalue()
 
-    col = quote_service.extract_dominant_color(avatar_bytes, "Hero")
-    assert col[2] > col[0]  # Blue channel should dominate
+    base_col, powder_col = quote_service.extract_noble_colors(avatar_bytes, "Hero")
+    assert base_col[2] > base_col[0]  # Blue channel should dominate
+    assert isinstance(powder_col, tuple)
+    assert len(powder_col) == 3
 
 
 def test_text_wrapping(quote_service: QuoteGeneratorService):
-    from PIL import ImageFont
-
-    font = ImageFont.truetype(quote_service.font_marck_path, 74)
     text = "Це довгий тестовий рядок для перевірки правильного розбиття слів на кілька рядків у манускрипті."
-    lines = quote_service._wrap_text_for_parchment(text, font, max_full_w=980, indent_w=180)
+    lines, font, font_sz, line_h, f_dc, dc_box, indent_w = quote_service._fit_text_to_bounds(
+        text=text,
+        font_path=quote_service.font_marck_path,
+        dropcap_char="Ц",
+        max_w=980,
+        max_h=800,
+    )
     assert len(lines) > 1
-    # First line should be wrapped
-    assert len(lines[0]) > 0
+    assert font_sz > 0
+    assert indent_w > 0
 
 
 def test_render_quote_dagger(quote_service: QuoteGeneratorService):
