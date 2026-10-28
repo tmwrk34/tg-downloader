@@ -393,3 +393,103 @@ async def test_inline_dice_handler_non_dice_prompt():
         assert results[0].id.startswith("ai_")
         assert "Ask AI" in results[0].title
         assert "це правда?" in results[0].description
+
+
+@pytest.mark.asyncio
+async def test_dice_command_and_secret_roll_handlers():
+    from datetime import UTC, datetime
+    from unittest.mock import AsyncMock
+
+    from aiogram.filters import CommandObject
+    from aiogram.types import CallbackQuery
+
+    from handlers.dice import (
+        dmroll_command_handler,
+        natural_dice_handler,
+        roll_command_handler,
+        secret_roll_callback_handler,
+    )
+
+    roller = User(id=101, is_bot=False, first_name="DungeonMaster")
+    intruder = User(id=202, is_bot=False, first_name="CuriousRogue")
+    group_chat = Chat(id=-100999, type="supergroup", title="D&D Party")
+    priv_chat = Chat(id=101, type="private")
+
+    msg_group = Message(
+        message_id=10,
+        date=datetime.now(UTC),
+        chat=group_chat,
+        from_user=roller,
+        text="/dmroll 2d6+3",
+    )
+    msg_priv = Message(
+        message_id=11,
+        date=datetime.now(UTC),
+        chat=priv_chat,
+        from_user=roller,
+        text="/dmroll 2d6+3",
+    )
+
+    # 1. Public /roll command
+    with patch("handlers.dice.safe_reply", new_callable=AsyncMock) as mock_reply:
+        await roll_command_handler(
+            msg_group, CommandObject(prefix="/", command="roll", args="2d6+3")
+        )
+        mock_reply.assert_awaited_once()
+        assert "DungeonMaster's Roll" in mock_reply.call_args.args[1]
+
+    # 2. Invalid /roll syntax
+    with patch("handlers.dice.safe_reply", new_callable=AsyncMock) as mock_reply:
+        await roll_command_handler(
+            msg_group, CommandObject(prefix="/", command="roll", args="invalid_dice")
+        )
+        mock_reply.assert_awaited_once()
+        assert "Invalid roll syntax" in mock_reply.call_args.args[1]
+
+    # 3. Secret /dmroll in private chat replies directly without button
+    with patch("handlers.dice.safe_reply", new_callable=AsyncMock) as mock_reply:
+        await dmroll_command_handler(
+            msg_priv, CommandObject(prefix="/", command="dmroll", args="1d20")
+        )
+        mock_reply.assert_awaited_once()
+        assert "reply_markup" not in mock_reply.call_args.kwargs
+
+    # 4. Secret /dmroll in group chat creates button and restricts view to roller
+    with patch("handlers.dice.safe_reply", new_callable=AsyncMock) as mock_reply:
+        await dmroll_command_handler(
+            msg_group, CommandObject(prefix="/", command="dmroll", args="1d20+5")
+        )
+        mock_reply.assert_awaited_once()
+        kb = mock_reply.call_args.kwargs["reply_markup"]
+        cb_data = kb.inline_keyboard[0][0].callback_data
+        assert cb_data.startswith("secret_roll:")
+
+    # 5. Intruder cannot view secret roll
+    cb_intruder = CallbackQuery(
+        id="cb1",
+        from_user=intruder,
+        chat_instance="ci1",
+        data=cb_data,
+    )
+    with patch.object(CallbackQuery, "answer", new_callable=AsyncMock) as mock_cb_ans:
+        await secret_roll_callback_handler(cb_intruder)
+        mock_cb_ans.assert_awaited_once()
+        assert "Only DungeonMaster can view" in mock_cb_ans.call_args.args[0]
+
+    # 6. Original roller can view secret roll
+    cb_owner = CallbackQuery(
+        id="cb2",
+        from_user=roller,
+        chat_instance="ci1",
+        data=cb_data,
+    )
+    with patch.object(CallbackQuery, "answer", new_callable=AsyncMock) as mock_cb_ans:
+        await secret_roll_callback_handler(cb_owner)
+        mock_cb_ans.assert_awaited_once()
+        assert "Secret Roll:" in mock_cb_ans.call_args.args[0]
+
+    # 7. Natural dice handler (secret & public)
+    with patch("handlers.dice.safe_reply", new_callable=AsyncMock) as mock_reply:
+        await natural_dice_handler(msg_group, dice_expr="1d20", is_secret=True)
+        assert mock_reply.await_count == 1
+        assert "Secret Roll made by" in mock_reply.call_args.args[1]

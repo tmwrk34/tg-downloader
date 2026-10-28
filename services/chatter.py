@@ -6,17 +6,15 @@ with per-chat SQLite configuration and vocabulary.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
-import os
 import random
 import re
-import sqlite3
-import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+
+from services.db_base import SQLiteWALService, resolve_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -53,18 +51,7 @@ _STRIP_PUNCT_RE = re.compile(r"^[\W_]+|[\W_]+$")
 
 def resolve_default_chatter_db() -> str:
     """Resolve the default SQLite path for chatterbot, falling back to local dir if data/ is not writable."""
-    env_path = os.getenv("CHATTER_DB")
-    if env_path:
-        return env_path
-    data_dir = Path("data")
-    try:
-        data_dir.mkdir(parents=True, exist_ok=True)
-        test_file = data_dir / ".write_test_chatter"
-        test_file.touch()
-        test_file.unlink()
-        return "data/chatter.db"
-    except (PermissionError, OSError):
-        return "chatter.db"
+    return resolve_db_path("CHATTER_DB", "chatter.db", ".write_test_chatter")
 
 
 def clean_and_tokenize(text: str) -> list[list[str]]:
@@ -120,37 +107,22 @@ class ChatterStats:
     unique_words: int
 
 
-class ChatterService:
+class ChatterService(SQLiteWALService):
     """
     Ultra-lightweight Markov chain generator and per-chat configuration engine
     backed by SQLite WAL storage.
     """
 
     def __init__(self, db_path: str | Path | None = None) -> None:
-        self.db_path = str(db_path) if db_path is not None else resolve_default_chatter_db()
-        self._is_memory = self.db_path == ":memory:"
-        self._lock = threading.Lock()
-        self._conn = self._create_connection()
+        resolved = str(db_path) if db_path is not None else resolve_default_chatter_db()
+        super().__init__(resolved)
         self._init_db()
 
         # Cache chat configs in memory for hot-path lookups: chat_id -> ChatterConfig
         self._config_cache: dict[int, ChatterConfig] = {}
 
-    def _create_connection(self) -> sqlite3.Connection:
-        if not self._is_memory and not self.db_path.startswith("file:"):
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        if self.db_path.startswith("file:"):
-            return sqlite3.connect(self.db_path, uri=True, check_same_thread=False)
-        return sqlite3.connect(self.db_path, check_same_thread=False)
-
     def _init_db(self) -> None:
         with self._lock:
-            if not self._is_memory:
-                self._conn.execute("PRAGMA journal_mode=WAL;")
-                self._conn.execute("PRAGMA synchronous=NORMAL;")
-                self._conn.execute("PRAGMA temp_store=MEMORY;")
-                self._conn.execute("PRAGMA cache_size=-4000;")
-
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chatter_settings (
@@ -186,6 +158,9 @@ class ChatterService:
                 "CREATE INDEX IF NOT EXISTS idx_chatter_seed ON chatter_markov(chat_id, w1);"
             )
             self._conn.commit()
+
+    def _on_close(self) -> None:
+        self._config_cache.clear()
 
     def _sync_get_config(self, chat_id: int) -> ChatterConfig:
         with self._lock:
@@ -240,11 +215,10 @@ class ChatterService:
             return cfg
 
     def _sync_update_config(self, chat_id: int, **kwargs: Any) -> ChatterConfig:
-        cfg = self._sync_get_config(chat_id)
+        base_cfg = self._sync_get_config(chat_id)
         with self._lock:
-            for k, v in kwargs.items():
-                if hasattr(cfg, k):
-                    setattr(cfg, k, v)
+            valid_updates = {k: v for k, v in kwargs.items() if hasattr(base_cfg, k)}
+            cfg = replace(base_cfg, **valid_updates)
 
             self._conn.execute(
                 """
@@ -494,9 +468,3 @@ class ChatterService:
     def pick_reaction() -> str:
         """Pick a random reaction emoji from the tavern pool."""
         return random.choice(CHATTER_REACTIONS)
-
-    def close(self) -> None:
-        with self._lock:
-            self._config_cache.clear()
-            with contextlib.suppress(Exception):
-                self._conn.close()

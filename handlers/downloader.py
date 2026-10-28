@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import Any
 
 from aiogram import F, Router
 from aiogram.enums import ChatAction
@@ -167,6 +168,28 @@ async def send_cached_media(message: Message, cached: CachedMedia) -> bool:
     return False
 
 
+async def _try_cache_media(
+    cache_key: str | None,
+    media_type: str,
+    file_id: str | None,
+    caption: str,
+    extra_data: dict[str, Any],
+) -> None:
+    """Safely store media metadata in cache without failing the user delivery flow."""
+    if not cache_key:
+        return
+    try:
+        await bot.media_cache.set(
+            cache_key=cache_key,
+            media_type=media_type,
+            file_id=file_id,
+            caption=caption,
+            extra_data=extra_data,
+        )
+    except Exception as e:
+        logger.warning("Failed to cache %s for %s: %s", media_type, cache_key, e)
+
+
 async def send_downloaded_media(
     message: Message,
     downloaded: DownloadedMedia,
@@ -181,10 +204,14 @@ async def send_downloaded_media(
     if downloaded.filesize > bot.config.max_payload_bytes:
         filesize_mb = downloaded.filesize / (1024 * 1024)
         limit_mb = bot.config.max_payload_bytes / (1024 * 1024)
-        await message.edit_text(
+        err_text = (
             f"⚠️ Downloaded file is too large ({filesize_mb:.1f} MB).\n"
             f"Configured bot limit is {limit_mb:.0f} MB."
         )
+        try:
+            await message.edit_text(err_text)
+        except TelegramAPIError:
+            await safe_reply(message, err_text)
         return False
 
     # Gallery / Carousel mode (e.g. Instagram / TikTok albums)
@@ -274,22 +301,19 @@ async def send_downloaded_media(
             if aud and getattr(aud, "file_id", None):
                 audio_file_id = aud.file_id
 
-        if cache_key and album_items:
-            try:
-                await bot.media_cache.set(
-                    cache_key=cache_key,
-                    media_type="album",
-                    file_id=None,
-                    caption=f"🎬 {downloaded.title}" if downloaded.title else "",
-                    extra_data={
-                        "items": album_items,
-                        "audio_file_id": audio_file_id,
-                        "audio_title": downloaded.track or downloaded.title,
-                        "audio_performer": downloaded.artist or "Unknown Artist",
-                    },
-                )
-            except Exception as e:
-                logger.warning("Failed to cache gallery for %s: %s", cache_key, e)
+        if album_items:
+            await _try_cache_media(
+                cache_key=cache_key,
+                media_type="album",
+                file_id=None,
+                caption=f"🎬 {downloaded.title}" if downloaded.title else "",
+                extra_data={
+                    "items": album_items,
+                    "audio_file_id": audio_file_id,
+                    "audio_title": downloaded.track or downloaded.title,
+                    "audio_performer": downloaded.artist or "Unknown Artist",
+                },
+            )
         return True
 
     caption = f"🎬 {downloaded.title}" if downloaded.title else ""
@@ -302,70 +326,65 @@ async def send_downloaded_media(
             if downloaded.thumbnail_path and downloaded.thumbnail_path.exists()
             else None
         )
+        duration_sec = int(round(downloaded.duration)) if downloaded.duration else 0
         sent_audio = await safe_reply_audio(
             message,
             audio=file_input,
             title=downloaded.track or downloaded.title,
             performer=downloaded.artist or "Unknown Artist",
             thumbnail=thumb_input,
-            duration=int(round(downloaded.duration)) if downloaded.duration else 0,
+            duration=duration_sec,
         )
         aud = getattr(sent_audio, "audio", None)
-        if cache_key and aud and getattr(aud, "file_id", None):
-            try:
-                await bot.media_cache.set(
-                    cache_key=cache_key,
-                    media_type="audio",
-                    file_id=aud.file_id,
-                    caption="",
-                    extra_data={
-                        "title": downloaded.track or downloaded.title,
-                        "performer": downloaded.artist or "Unknown Artist",
-                        "duration": int(round(downloaded.duration)) if downloaded.duration else 0,
-                    },
-                )
-            except Exception as e:
-                logger.warning("Failed to cache audio for %s: %s", cache_key, e)
+        if aud and getattr(aud, "file_id", None):
+            await _try_cache_media(
+                cache_key=cache_key,
+                media_type="audio",
+                file_id=aud.file_id,
+                caption="",
+                extra_data={
+                    "title": downloaded.track or downloaded.title,
+                    "performer": downloaded.artist or "Unknown Artist",
+                    "duration": duration_sec,
+                },
+            )
     elif ext in {".jpg", ".jpeg", ".png", ".webp"}:
         sent_photo = await safe_reply_photo(message, photo=file_input, caption=caption)
         photos = getattr(sent_photo, "photo", None)
-        if cache_key and photos and len(photos) > 0:
-            try:
-                await bot.media_cache.set(
-                    cache_key=cache_key,
-                    media_type="photo",
-                    file_id=photos[-1].file_id,
-                    caption=caption,
-                    extra_data={},
-                )
-            except Exception as e:
-                logger.warning("Failed to cache photo for %s: %s", cache_key, e)
+        if photos and len(photos) > 0:
+            await _try_cache_media(
+                cache_key=cache_key,
+                media_type="photo",
+                file_id=photos[-1].file_id,
+                caption=caption,
+                extra_data={},
+            )
     else:
+        duration_sec = int(round(downloaded.duration)) if downloaded.duration else 0
+        width_px = int(round(downloaded.width)) if downloaded.width else 0
+        height_px = int(round(downloaded.height)) if downloaded.height else 0
         sent_video = await safe_reply_video(
             message,
             video=file_input,
             caption=caption,
-            duration=int(round(downloaded.duration)) if downloaded.duration else 0,
-            width=int(round(downloaded.width)) if downloaded.width else 0,
-            height=int(round(downloaded.height)) if downloaded.height else 0,
+            duration=duration_sec,
+            width=width_px,
+            height=height_px,
             supports_streaming=True,
         )
         vid = getattr(sent_video, "video", None)
-        if cache_key and vid and getattr(vid, "file_id", None):
-            try:
-                await bot.media_cache.set(
-                    cache_key=cache_key,
-                    media_type="video",
-                    file_id=vid.file_id,
-                    caption=caption,
-                    extra_data={
-                        "duration": int(round(downloaded.duration)) if downloaded.duration else 0,
-                        "width": int(round(downloaded.width)) if downloaded.width else 0,
-                        "height": int(round(downloaded.height)) if downloaded.height else 0,
-                    },
-                )
-            except Exception as e:
-                logger.warning("Failed to cache video for %s: %s", cache_key, e)
+        if vid and getattr(vid, "file_id", None):
+            await _try_cache_media(
+                cache_key=cache_key,
+                media_type="video",
+                file_id=vid.file_id,
+                caption=caption,
+                extra_data={
+                    "duration": duration_sec,
+                    "width": width_px,
+                    "height": height_px,
+                },
+            )
 
     return True
 

@@ -8,395 +8,48 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
-import html
 import json
 import logging
-import os
-import re
 import sqlite3
-import threading
 import time
-from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import aiohttp
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from services.db_base import SQLiteWALService, resolve_db_path
 from services.dice import DiceParser
-
-logger = logging.getLogger(__name__)
-
-DEFAULT_SYSTEM_PROMPT = (
-    "You are Bard (Бард), a witty, observant, and genuinely helpful AI assistant and digital companion in this Telegram chat and tavern.\n\n"
-    "Identity & Capabilities:\n"
-    "- Your name is Bard (@bard_taverna_bot).\n"
-    "- You are the heart of this tavern bot. Your actual capabilities include:\n"
-    "  1. Media Downloader: Automatically downloads videos and audio from TikTok, YouTube, Instagram Reels/Posts, and Pinterest when users share links in the chat.\n"
-    "  2. Tabletop Dice Roller: Rolls dice for tabletop RPGs (D&D, Pathfinder, etc.) via /roll (e.g. /roll 2d20+5, 1d100, 4d6kh3, or natural requests like 'кинь d20').\n"
-    "  3. AI Assistant & Vision: You understand images/photos, answer questions, provide summaries, and maintain rolling conversation context memory per chat.\n"
-    "  4. Tavern Chatter: You learn local chat lore and occasionally chime in with humor or reactions.\n"
-    "- If asked who you are or what you can do, proudly describe your identity and features as Bard without mentioning underlying cloud or model providers (like Munito, DeepSeek, or Qwen) unless explicitly asked about technical architecture.\n\n"
-    "Tool Usage:\n"
-    "- You have access to real tools such as roll_dice to execute cryptographically secure tabletop dice rolls.\n"
-    "- Whenever a user asks you to roll a die, make a skill check, roll for initiative/damage, or settle a dispute with dice, ALWAYS invoke the roll_dice tool instead of guessing or hallucinating numbers.\n\n"
-    "Communication Style:\n"
-    "- Always respond in the exact same language as the user's current prompt or message (e.g. if asked in Ukrainian, reply in Ukrainian; if asked in Russian, reply in Russian; if asked in English, reply in English).\n"
-    "- Be witty, charismatic, and concise. Avoid robotic filler, repetitive disclaimers, or corporate apologies.\n"
-    "- Format answers cleanly using Telegram-friendly HTML/Markdown when appropriate."
+from services.munito_ui import (
+    AI_TOOLS,
+    AVAILABLE_MODELS,
+    CONTEXT_MODE_OPTIONS,
+    CONTEXT_SIZE_OPTIONS,
+    DEFAULT_MODEL,
+    DEFAULT_SYSTEM_PROMPT,
+    REASONING_EFFORT_LEVELS,
+    AIChatConfig,
+    AIChatStats,
+    AIChatTurn,
+    build_ai_keyboard,
+    format_ai_card,
+    get_next_context_mode,
+    get_next_context_size,
+    get_next_model,
+    get_next_reasoning_effort,
+    markdown_to_telegram_html,
+    split_telegram_message,
 )
 
-AI_TOOLS: list[dict[str, Any]] = [
-    {
-        "type": "function",
-        "function": {
-            "name": "roll_dice",
-            "description": (
-                "Roll tabletop RPG dice using standard notation (e.g. '1d20', '2d6+5', '4d6kh3', '1d100', '2d20kl1'). "
-                "Evaluates real cryptographically secure random rolls with kept/dropped status, modifiers, and critical hit/fail detection."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "expression": {
-                        "type": "string",
-                        "description": "Standard dice notation expression, e.g. '1d20', '2d6+4', '3d8', '1d100', '4d6kh3'",
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "Optional in-game reason, action, or skill check name (e.g. 'stealth check', 'атака', 'перевірка уважності')",
-                    },
-                },
-                "required": ["expression"],
-            },
-        },
-    }
-]
-
-DEFAULT_MODEL = "deepseek-ai/deepseek-v4.1-flash-1017"
-
-AVAILABLE_MODELS = [
-    "deepseek-ai/deepseek-v4.1-flash-1017",
-    "qwen/qwen3.8-27b",
-    "deepseek-ai/deepseek-v4-flash",
-    "zai-org/glm-5.3-flash",
-    "google/gemma-4-12b",
-]
-
-REASONING_EFFORT_LEVELS = ["low", "medium", "high"]
-CONTEXT_SIZE_OPTIONS = [0, 5, 10, 15, 20]
-CONTEXT_MODE_OPTIONS = ["mentions", "all"]
+logger = logging.getLogger(__name__)
 
 
 def resolve_default_ai_db() -> str:
     """Resolve the default SQLite path for AI assistant, falling back to local dir if data/ is not writable."""
-    env_path = os.getenv("AI_DB")
-    if env_path:
-        return env_path
-    data_dir = Path("data")
-    try:
-        data_dir.mkdir(parents=True, exist_ok=True)
-        test_file = data_dir / ".write_test_ai"
-        test_file.touch()
-        test_file.unlink()
-        return "data/ai.db"
-    except (PermissionError, OSError):
-        return "ai.db"
+    return resolve_db_path("AI_DB", "ai.db", ".write_test_ai")
 
 
-@dataclass
-class AIChatConfig:
-    chat_id: int
-    enabled: bool = True
-    model: str = DEFAULT_MODEL
-    system_prompt: str | None = None
-    reasoning_effort: str = "low"
-    context_mode: str = "mentions"  # "mentions" | "all"
-    context_size: int = 10  # number of recent messages to inject (0 = disabled)
-
-
-@dataclass(frozen=True)
-class AIChatTurn:
-    id: int
-    chat_id: int
-    user_id: int | None
-    user_name: str | None
-    role: str
-    content: str
-    has_image: bool
-    created_at: float
-
-
-@dataclass(frozen=True)
-class AIChatStats:
-    chat_id: int
-    request_count: int = 0
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-
-
-def get_next_model(current_model: str) -> str:
-    """Cycle to the next available model."""
-    try:
-        idx = AVAILABLE_MODELS.index(current_model)
-        return AVAILABLE_MODELS[(idx + 1) % len(AVAILABLE_MODELS)]
-    except ValueError:
-        return AVAILABLE_MODELS[0]
-
-
-def get_next_reasoning_effort(current_effort: str) -> str:
-    """Cycle reasoning effort levels: low -> none -> high -> low."""
-    try:
-        idx = REASONING_EFFORT_LEVELS.index(current_effort.lower())
-        return REASONING_EFFORT_LEVELS[(idx + 1) % len(REASONING_EFFORT_LEVELS)]
-    except ValueError:
-        return REASONING_EFFORT_LEVELS[0]
-
-
-def get_next_context_size(current_size: int) -> int:
-    """Cycle context size: 0 -> 5 -> 10 -> 15 -> 20 -> 0."""
-    try:
-        idx = CONTEXT_SIZE_OPTIONS.index(current_size)
-        return CONTEXT_SIZE_OPTIONS[(idx + 1) % len(CONTEXT_SIZE_OPTIONS)]
-    except ValueError:
-        return 10
-
-
-def get_next_context_mode(current_mode: str) -> str:
-    """Toggle context collection mode between 'mentions' and 'all'."""
-    return "all" if current_mode.lower() == "mentions" else "mentions"
-
-
-def format_ai_card(
-    chat_title: str,
-    chat_id: int,
-    cfg: AIChatConfig,
-    stats: AIChatStats,
-    history_count: int = 0,
-) -> str:
-    """Format AI assistant status, model, context memory, and token usage into an HTML message."""
-    status_str = "🟢 Enabled" if cfg.enabled else "🔴 Disabled"
-    effort_labels = {
-        "low": "⚡ Low (Fast, ~15s)",
-        "none": "⚡ Low (Fast, ~15s)",
-        "medium": "⚖️ Medium (~35s)",
-        "high": "🧠 High (Deep CoT, ~90s)",
-    }
-    effort_display = effort_labels.get(cfg.reasoning_effort, cfg.reasoning_effort)
-    mode_labels = {
-        "mentions": "🎯 Mentions Only",
-        "all": "🌐 All Chat Messages",
-    }
-    mode_display = mode_labels.get(cfg.context_mode, cfg.context_mode)
-
-    if cfg.context_size > 0:
-        memory_str = f"🟢 Active ({history_count}/{cfg.context_size} msgs, {mode_display})"
-    else:
-        memory_str = "⚪ Disabled (0 msgs)"
-
-    return (
-        f"🤖 <b>Munito AI Assistant Settings</b>\n"
-        f"<b>Chat:</b> <code>{chat_title}</code> (<code>{chat_id}</code>)\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ <b>Status:</b> {status_str}\n"
-        f"🧠 <b>Model:</b> <code>{cfg.model}</code>\n"
-        f"💭 <b>Thinking:</b> <code>{effort_display}</code>\n"
-        f"💬 <b>Memory:</b> <code>{memory_str}</code>\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Token Usage:</b>\n"
-        f"  • Total requests: <b>{stats.request_count:,}</b>\n"
-        f"  • Prompt tokens: <b>{stats.prompt_tokens:,}</b>\n"
-        f"  • Generated tokens: <b>{stats.completion_tokens:,}</b>\n"
-        f"  • Total tokens: <b>{stats.total_tokens:,}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Triggered exclusively via bot tag: @bot &lt;prompt&gt;</i>"
-    )
-
-
-def build_ai_keyboard(
-    chat_id: int, cfg: AIChatConfig, confirm_reset: bool = False
-) -> InlineKeyboardMarkup:
-    """Construct inline keyboard for AI configuration."""
-    toggle_text = "🔴 Disable" if cfg.enabled else "🟢 Enable"
-    model_short = cfg.model.split("/")[-1]
-    mode_short = "🎯 Mentions" if cfg.context_mode == "mentions" else "🌐 All Chat"
-    ctx_text = f"💬 Context: {cfg.context_size} msgs" if cfg.context_size > 0 else "💬 Context: Off"
-
-    rows = [
-        [
-            InlineKeyboardButton(
-                text=f"Status: {toggle_text}",
-                callback_data=f"ai:toggle:{chat_id}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"🧠 Model: {model_short}",
-                callback_data=f"ai:model:{chat_id}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=f"💭 Thinking: {cfg.reasoning_effort.title()}",
-                callback_data=f"ai:effort:{chat_id}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=ctx_text,
-                callback_data=f"ai:ctx_size:{chat_id}",
-            ),
-            InlineKeyboardButton(
-                text=f"Mode: {mode_short}",
-                callback_data=f"ai:ctx_mode:{chat_id}",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="🧠 Forget Context",
-                callback_data=f"ai:clear_mem:{chat_id}",
-            )
-        ],
-    ]
-
-    if confirm_reset:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="⚠️ Confirm Reset Stats",
-                    callback_data=f"ai:reset_confirm:{chat_id}",
-                ),
-                InlineKeyboardButton(
-                    text="❌ Cancel",
-                    callback_data=f"ai:refresh:{chat_id}",
-                ),
-            ]
-        )
-    else:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="🧹 Reset Token Stats",
-                    callback_data=f"ai:reset_prompt:{chat_id}",
-                )
-            ]
-        )
-
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="🔄 Refresh",
-                callback_data=f"ai:refresh:{chat_id}",
-            )
-        ]
-    )
-
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def split_telegram_message(text: str, max_chars: int = 4000) -> list[str]:
-    """
-    Split a long response into chunks suitable for Telegram message limits (4096 chars).
-    Prefers splitting by double newlines, single newlines, or spaces.
-    """
-    if len(text) <= max_chars:
-        return [text]
-
-    chunks: list[str] = []
-    current = text
-
-    while len(current) > max_chars:
-        split_at = current.rfind("\n\n", 0, max_chars)
-        if split_at == -1 or split_at < max_chars // 2:
-            split_at = current.rfind("\n", 0, max_chars)
-        if split_at == -1 or split_at < max_chars // 2:
-            split_at = current.rfind(" ", 0, max_chars)
-        if split_at == -1:
-            split_at = max_chars
-
-        chunks.append(current[:split_at].strip())
-        current = current[split_at:].strip()
-
-    if current:
-        chunks.append(current)
-
-    return chunks
-
-
-def markdown_to_telegram_html(text: str) -> str:
-    """
-    Convert Markdown text from LLM completions into valid Telegram HTML format.
-    Safely escapes raw HTML characters outside of tags, formats code blocks,
-    inline code, bold, italic, strikethrough, links, and bullet points.
-    """
-    if not text:
-        return ""
-
-    # Placeholders for code blocks and inline code to prevent accidental markup collision
-    placeholders: list[str] = []
-
-    def save_placeholder(content: str) -> str:
-        idx = len(placeholders)
-        placeholders.append(content)
-        return f"\x00CODE{idx}\x00"
-
-    # 1. Protect code blocks: ```lang\ncode\n```
-    def replace_code_block(match: re.Match) -> str:
-        lang = match.group(1) or ""
-        code = match.group(2)
-        code_escaped = html.escape(code, quote=False)
-        if lang:
-            tag = f'<pre><code class="language-{html.escape(lang.strip(), quote=True)}">{code_escaped}</code></pre>'
-        else:
-            tag = f"<pre><code>{code_escaped}</code></pre>"
-        return save_placeholder(tag)
-
-    result = re.sub(r"```([a-zA-Z0-9_\-\+]*)\n?([\s\S]*?)```", replace_code_block, text)
-
-    # 2. Protect inline code: `code`
-    def replace_inline_code(match: re.Match) -> str:
-        code = match.group(1)
-        return save_placeholder(f"<code>{html.escape(code, quote=False)}</code>")
-
-    result = re.sub(r"`([^`\n]+)`", replace_inline_code, result)
-
-    # 3. Escape HTML characters in remaining text (&, <, >)
-    result = html.escape(result, quote=False)
-
-    # 4. Headers: # Title -> <b>Title</b>
-    result = re.sub(r"(?m)^#{1,6}\s+(.+)$", r"<b>\1</b>", result)
-
-    # 5. Bold: **text** or __text__
-    result = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", result)
-    result = re.sub(r"__(.+?)__", r"<b>\1</b>", result)
-
-    # 6. Italic: *text* or _text_
-    result = re.sub(r"(?<!\w)\*([^\*\n]+?)\*(?!\w)", r"<i>\1</i>", result)
-    result = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", result)
-
-    # 7. Strikethrough: ~~text~~
-    result = re.sub(r"~~(.+?)~~", r"<s>\1</s>", result)
-
-    # 8. Links: [label](url)
-    def replace_link(match: re.Match) -> str:
-        label = match.group(1)
-        url = match.group(2)
-        return f'<a href="{url}">{label}</a>'
-
-    result = re.sub(r"\[([^\]]+)\]\((https?://[^\s\)]+)\)", replace_link, result)
-
-    # 9. List bullets: convert leading "- " or "* " to clean Unicode bullet "• "
-    result = re.sub(r"(?m)^[\*\-]\s+", "• ", result)
-
-    # 10. Restore code blocks and inline code
-    for idx, content in enumerate(placeholders):
-        result = result.replace(f"\x00CODE{idx}\x00", content)
-
-    return result
-
-
-class MunitoAIService:
+class MunitoAIService(SQLiteWALService):
     """Async client for Munito AI OpenAI-compatible chat completions with persistent config."""
 
     def __init__(
@@ -417,10 +70,8 @@ class MunitoAIService:
         self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
         self.timeout_seconds = timeout_seconds
 
-        self.db_path = str(db_path) if db_path is not None else resolve_default_ai_db()
-        self._is_memory = self.db_path == ":memory:"
-        self._lock = threading.Lock()
-        self._conn = self._create_connection()
+        resolved = str(db_path) if db_path is not None else resolve_default_ai_db()
+        super().__init__(resolved)
         self._init_db()
 
         self._config_cache: dict[int, AIChatConfig] = {}
@@ -434,20 +85,12 @@ class MunitoAIService:
     def is_configured(self) -> bool:
         return bool(self.api_key and self.api_key.strip())
 
-    def _create_connection(self) -> sqlite3.Connection:
-        if not self._is_memory and not self.db_path.startswith("file:"):
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        if self.db_path.startswith("file:"):
-            return sqlite3.connect(self.db_path, uri=True, check_same_thread=False)
-        return sqlite3.connect(self.db_path, check_same_thread=False)
+    def _on_close(self) -> None:
+        self._config_cache.clear()
+        self._stats_cache.clear()
 
     def _init_db(self) -> None:
         with self._lock:
-            if not self._is_memory:
-                self._conn.execute("PRAGMA journal_mode=WAL;")
-                self._conn.execute("PRAGMA synchronous=NORMAL;")
-                self._conn.execute("PRAGMA temp_store=MEMORY;")
-
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ai_chat_settings (
@@ -461,18 +104,13 @@ class MunitoAIService:
                 )
                 """
             )
-            with contextlib.suppress(sqlite3.OperationalError):
-                self._conn.execute(
-                    "ALTER TABLE ai_chat_settings ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT 'low'"
-                )
-            with contextlib.suppress(sqlite3.OperationalError):
-                self._conn.execute(
-                    "ALTER TABLE ai_chat_settings ADD COLUMN context_mode TEXT NOT NULL DEFAULT 'mentions'"
-                )
-            with contextlib.suppress(sqlite3.OperationalError):
-                self._conn.execute(
-                    "ALTER TABLE ai_chat_settings ADD COLUMN context_size INTEGER NOT NULL DEFAULT 10"
-                )
+            for col_ddl in (
+                "ALTER TABLE ai_chat_settings ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT 'low'",
+                "ALTER TABLE ai_chat_settings ADD COLUMN context_mode TEXT NOT NULL DEFAULT 'mentions'",
+                "ALTER TABLE ai_chat_settings ADD COLUMN context_size INTEGER NOT NULL DEFAULT 10",
+            ):
+                with contextlib.suppress(sqlite3.OperationalError):
+                    self._conn.execute(col_ddl)
 
             self._conn.execute(
                 """
@@ -512,7 +150,8 @@ class MunitoAIService:
 
             cursor = self._conn.cursor()
             cursor.execute(
-                "SELECT enabled, model, system_prompt, reasoning_effort, context_mode, context_size FROM ai_chat_settings WHERE chat_id = ?",
+                "SELECT enabled, model, system_prompt, reasoning_effort, context_mode, context_size "
+                "FROM ai_chat_settings WHERE chat_id = ?",
                 (chat_id,),
             )
             row = cursor.fetchone()
@@ -539,8 +178,9 @@ class MunitoAIService:
                 )
                 self._conn.execute(
                     """
-                    INSERT OR IGNORE INTO ai_chat_settings (chat_id, enabled, model, system_prompt, reasoning_effort, context_mode, context_size)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR IGNORE INTO ai_chat_settings (
+                        chat_id, enabled, model, system_prompt, reasoning_effort, context_mode, context_size
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         chat_id,
@@ -558,16 +198,16 @@ class MunitoAIService:
             return cfg
 
     def _sync_update_chat_config(self, chat_id: int, **kwargs: Any) -> AIChatConfig:
-        cfg = self._sync_get_chat_config(chat_id)
+        base_cfg = self._sync_get_chat_config(chat_id)
         with self._lock:
-            for k, v in kwargs.items():
-                if hasattr(cfg, k):
-                    setattr(cfg, k, v)
+            valid_updates = {k: v for k, v in kwargs.items() if hasattr(base_cfg, k)}
+            cfg = replace(base_cfg, **valid_updates)
 
             self._conn.execute(
                 """
-                INSERT OR REPLACE INTO ai_chat_settings (chat_id, enabled, model, system_prompt, reasoning_effort, context_mode, context_size)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO ai_chat_settings (
+                    chat_id, enabled, model, system_prompt, reasoning_effort, context_mode, context_size
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
@@ -653,7 +293,6 @@ class MunitoAIService:
                 """,
                 (chat_id, user_id, user_name, role, content, int(has_image), time.time()),
             )
-            # Prune older messages per chat to keep table size bounded
             self._conn.execute(
                 """
                 DELETE FROM ai_chat_history
@@ -682,7 +321,7 @@ class MunitoAIService:
                 (chat_id, limit),
             )
             rows = cursor.fetchall()
-            turns = [
+            return [
                 AIChatTurn(
                     id=row[0],
                     chat_id=row[1],
@@ -695,10 +334,8 @@ class MunitoAIService:
                 )
                 for row in reversed(rows)
             ]
-            return turns
 
     def _sync_get_history_count(self, chat_id: int) -> int:
-        """Get the total number of stored history entries for a chat."""
         with self._lock:
             cursor = self._conn.cursor()
             cursor.execute(
@@ -709,7 +346,6 @@ class MunitoAIService:
             return int(row[0]) if row else 0
 
     def _sync_clear_chat_history(self, chat_id: int) -> int:
-        """Delete all history entries for a chat and return count deleted."""
         with self._lock:
             cursor = self._conn.cursor()
             cursor.execute("DELETE FROM ai_chat_history WHERE chat_id = ?", (chat_id,))
@@ -763,14 +399,6 @@ class MunitoAIService:
 
     async def clear_chat_history(self, chat_id: int) -> int:
         return await asyncio.to_thread(self._sync_clear_chat_history, chat_id)
-
-    def close(self) -> None:
-        """Close SQLite database connection."""
-        with self._lock:
-            try:
-                self._conn.close()
-            except Exception:
-                pass
 
     async def _send_completion_request(
         self,
@@ -843,6 +471,55 @@ class MunitoAIService:
             logger.error("Munito AI network connection error: %s", err)
             raise RuntimeError(f"Failed to connect to Munito AI: {err}") from err
 
+    @staticmethod
+    def _execute_tool_calls(
+        tool_calls: list[dict[str, Any]],
+        messages: list[dict[str, Any]],
+    ) -> None:
+        """Evaluate requested tool calls (e.g. `roll_dice`) and append tool outputs to `messages`."""
+        for tc in tool_calls:
+            call_id = tc.get("id") or "call_default"
+            func_info = tc.get("function") or {}
+            func_name = func_info.get("name")
+            raw_args = func_info.get("arguments") or "{}"
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except Exception:
+                args = {}
+
+            if func_name == "roll_dice":
+                expr = str(args.get("expression") or "1d20").strip()
+                reason = args.get("reason")
+                try:
+                    roll_res = DiceParser.parse_and_roll(expr)
+                    crit_label = None
+                    if roll_res.is_crit_hit:
+                        crit_label = "CRITICAL HIT (Natural 20!)"
+                    elif roll_res.is_crit_fail:
+                        crit_label = "CRITICAL FAIL (Natural 1!)"
+
+                    tool_output: dict[str, Any] = {
+                        "expression": roll_res.normalized_expression,
+                        "total": roll_res.total,
+                        "constant_modifier": roll_res.constant_modifier,
+                        "critical": crit_label,
+                        "plain_summary": roll_res.format_plain_text(),
+                        "reason": reason,
+                    }
+                except Exception as exc:
+                    tool_output = {
+                        "error": f"Failed to parse or roll dice expression '{expr}': {exc}"
+                    }
+
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": func_name,
+                        "content": json.dumps(tool_output, ensure_ascii=False),
+                    }
+                )
+
     async def generate_reply(
         self,
         prompt: str,
@@ -876,7 +553,6 @@ class MunitoAIService:
 
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
-        # Inject conversation history if context memory is active for this chat
         if chat_id is not None and cfg is not None and cfg.context_size > 0:
             history = await self.get_chat_history(chat_id, limit=cfg.context_size)
             for turn in history:
@@ -886,9 +562,6 @@ class MunitoAIService:
                     prefix = f"[{turn.user_name}]: " if turn.user_name else ""
                     messages.append({"role": "user", "content": f"{prefix}{turn.content}"})
 
-        user_content: list[dict[str, Any]] = []
-
-        # If user referenced previous text from another message
         full_text_prompt = ""
         if context_text and context_text.strip():
             full_text_prompt += f"[Referenced chat message]:\n{context_text.strip()}\n\n"
@@ -898,22 +571,20 @@ class MunitoAIService:
         elif not image_bytes:
             full_text_prompt += "Explain or reply to this message."
 
-        # Prepend sender name if available so the model distinguishes different speakers in groups
-        user_display_prompt = full_text_prompt
-        if user_name:
-            user_display_prompt = f"[{user_name}]: {full_text_prompt}"
+        user_display_prompt = (
+            f"[{user_name}]: {full_text_prompt}" if user_name else full_text_prompt
+        )
 
+        user_content: list[dict[str, Any]] = []
         if user_display_prompt:
             user_content.append({"type": "text", "text": user_display_prompt})
 
-        # If user attached or referenced an image
         if image_bytes:
             b64_image = base64.b64encode(image_bytes).decode("ascii")
-            data_url = f"data:{image_mime};base64,{b64_image}"
             user_content.append(
                 {
                     "type": "image_url",
-                    "image_url": {"url": data_url},
+                    "image_url": {"url": f"data:{image_mime};base64,{b64_image}"},
                 }
             )
 
@@ -932,8 +603,9 @@ class MunitoAIService:
         }
 
         if "deepseek" in target_model.lower():
-            raw_effort = (cfg.reasoning_effort or "low").lower() if chat_id is not None else "low"
-            # OpenAI / Munito reasoning_effort strictly supports 'low', 'medium', 'high'
+            raw_effort = (
+                (cfg.reasoning_effort or "low").lower() if (chat_id is not None and cfg) else "low"
+            )
             effort = "low" if raw_effort in {"none", "low"} else raw_effort
             if effort not in {"low", "medium", "high"}:
                 effort = "low"
@@ -947,7 +619,6 @@ class MunitoAIService:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-
         url = f"{self.base_url}/chat/completions"
         timeout = aiohttp.ClientTimeout(
             total=self.timeout_seconds,
@@ -982,11 +653,9 @@ class MunitoAIService:
             if not choices:
                 raise RuntimeError("Munito AI returned an empty response.")
 
-            first_choice = choices[0]
-            message_obj = first_choice.get("message") or {}
+            message_obj = choices[0].get("message") or {}
             tool_calls = message_obj.get("tool_calls") or []
 
-            # If the model requested tool execution (e.g. roll_dice)
             if tool_calls:
                 logger.info(
                     "Munito AI invoked %d tool call(s) (chat_id=%s)",
@@ -994,51 +663,8 @@ class MunitoAIService:
                     chat_id,
                 )
                 messages.append(message_obj)
+                self._execute_tool_calls(tool_calls, messages)
 
-                for tc in tool_calls:
-                    call_id = tc.get("id") or "call_default"
-                    func_info = tc.get("function") or {}
-                    func_name = func_info.get("name")
-                    raw_args = func_info.get("arguments") or "{}"
-                    try:
-                        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                    except Exception:
-                        args = {}
-
-                    if func_name == "roll_dice":
-                        expr = str(args.get("expression") or "1d20").strip()
-                        reason = args.get("reason")
-                        try:
-                            roll_res = DiceParser.parse_and_roll(expr)
-                            crit_label = None
-                            if roll_res.is_crit_hit:
-                                crit_label = "CRITICAL HIT (Natural 20!)"
-                            elif roll_res.is_crit_fail:
-                                crit_label = "CRITICAL FAIL (Natural 1!)"
-
-                            tool_output = {
-                                "expression": roll_res.normalized_expression,
-                                "total": roll_res.total,
-                                "constant_modifier": roll_res.constant_modifier,
-                                "critical": crit_label,
-                                "plain_summary": roll_res.format_plain_text(),
-                                "reason": reason,
-                            }
-                        except Exception as exc:
-                            tool_output = {
-                                "error": f"Failed to parse or roll dice expression '{expr}': {exc}"
-                            }
-
-                        messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": call_id,
-                                "name": func_name,
-                                "content": json.dumps(tool_output, ensure_ascii=False),
-                            }
-                        )
-
-                # Send follow-up request without tools so model explains the result
                 followup_payload = dict(payload)
                 followup_payload["messages"] = messages
                 followup_payload.pop("tools", None)
@@ -1060,29 +686,21 @@ class MunitoAIService:
 
                 choices2 = data2.get("choices") or []
                 if choices2:
-                    first_choice = choices2[0]
-                    message_obj = first_choice.get("message") or {}
+                    message_obj = choices2[0].get("message") or {}
 
-        # Record total token metrics across all turns
         if chat_id is not None:
             await self.record_usage(chat_id, p_tok, c_tok, t_tok)
 
-        first_choice = choices[0]
-        content = message_obj.get("content")
-
-        if not content and message_obj.get("reasoning"):
-            content = message_obj["reasoning"]
-
+        content = message_obj.get("content") or message_obj.get("reasoning")
         if not content or not str(content).strip():
             reply_result = "<i>(Model returned an empty response)</i>"
         else:
             reply_result = str(content).strip()
 
-        # Record conversation turns in history if memory is active
         if chat_id is not None and cfg is not None and cfg.context_size > 0:
-            hist_user_text = full_text_prompt
-            if image_bytes:
-                hist_user_text = f"[Photo attached] {full_text_prompt}".strip()
+            hist_user_text = (
+                f"[Photo attached] {full_text_prompt}".strip() if image_bytes else full_text_prompt
+            )
             await self.record_turn(
                 chat_id=chat_id,
                 role="user",
@@ -1101,3 +719,27 @@ class MunitoAIService:
             )
 
         return reply_result
+
+
+__all__ = [
+    "AI_TOOLS",
+    "AVAILABLE_MODELS",
+    "CONTEXT_MODE_OPTIONS",
+    "CONTEXT_SIZE_OPTIONS",
+    "DEFAULT_MODEL",
+    "DEFAULT_SYSTEM_PROMPT",
+    "REASONING_EFFORT_LEVELS",
+    "AIChatConfig",
+    "AIChatStats",
+    "AIChatTurn",
+    "MunitoAIService",
+    "build_ai_keyboard",
+    "format_ai_card",
+    "get_next_context_mode",
+    "get_next_context_size",
+    "get_next_model",
+    "get_next_reasoning_effort",
+    "markdown_to_telegram_html",
+    "resolve_default_ai_db",
+    "split_telegram_message",
+]
