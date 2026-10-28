@@ -10,6 +10,8 @@ requires-python = ">=3.13"
 dependencies = [
     "aiogram>=3.31.0",
     "curl-cffi>=0.16.0",
+    "numpy>=1.26.0",
+    "pillow>=10.0.0",
     "python-dotenv>=1.2.4",
     "yt-dlp>=2026.10.21",
 ]
