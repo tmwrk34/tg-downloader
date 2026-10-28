@@ -27,10 +27,10 @@ def select_optimal_photo(photos: list[PhotoSize]) -> PhotoSize:
     return photos[-2]
 
 
-async def download_telegram_photo(active_bot: Bot, photo: PhotoSize) -> bytes | None:
-    """Download photo bytes safely, supporting direct local filesystem access and HTTP fallback."""
+async def download_telegram_file_id(active_bot: Bot, file_id: str) -> bytes | None:
+    """Download any Telegram file bytes safely by file_id, supporting direct local filesystem access and HTTP fallback."""
     try:
-        file_info = await active_bot.get_file(photo.file_id)
+        file_info = await active_bot.get_file(file_id)
         if not file_info.file_path:
             return None
 
@@ -40,7 +40,7 @@ async def download_telegram_photo(active_bot: Bot, photo: PhotoSize) -> bytes | 
             if local_candidate.is_file():
                 return local_candidate.read_bytes()
         except (PermissionError, OSError) as perm_err:
-            logger.warning("Direct local photo read failed due to permissions/OS: %s", perm_err)
+            logger.warning("Direct local file read failed due to permissions/OS: %s", perm_err)
 
         # 2. Try standard aiogram download
         try:
@@ -66,8 +66,13 @@ async def download_telegram_photo(active_bot: Bot, photo: PhotoSize) -> bytes | 
                     if resp.status == 200:
                         return await resp.read()
                     logger.warning(
-                        "Local bot API photo fetch returned %s for %s", resp.status, download_url
+                        "Local bot API file fetch returned %s for %s", resp.status, download_url
                     )
     except Exception as e:
-        logger.warning("Failed to download photo for Munito AI: %s", e)
+        logger.warning("Failed to download file_id %s: %s", file_id, e)
     return None
+
+
+async def download_telegram_photo(active_bot: Bot, photo: PhotoSize) -> bytes | None:
+    """Download photo bytes safely, supporting direct local filesystem access and HTTP fallback."""
+    return await download_telegram_file_id(active_bot, photo.file_id)

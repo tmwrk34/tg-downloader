@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import logging
 
 from aiogram import Bot, Router
@@ -10,6 +9,7 @@ from aiogram.types import BufferedInputFile, Message
 
 from services.quote_generator import QuoteGeneratorService
 from utils.responses import safe_reply
+from utils.telegram_media import download_telegram_file_id
 
 logger = logging.getLogger(__name__)
 
@@ -26,91 +26,71 @@ async def _download_avatar_bytes(
     message: Message | None = None,
 ) -> bytes | None:
     """Exhaustively retrieves avatar photo bytes via profile photos, chat info, or attached media."""
-    # 1. Try bot.get_user_profile_photos
+    # 1. Check user profile photos
     if user_id:
         try:
             photos = await bot.get_user_profile_photos(user_id=user_id, limit=1)
             if photos and photos.photos and photos.photos[0]:
                 best_photo = photos.photos[0][-1]
-                file_info = await bot.get_file(best_photo.file_id)
-                if file_info.file_path:
-                    stream = io.BytesIO()
-                    await bot.download_file(file_info.file_path, destination=stream)
-                    val = stream.getvalue()
-                    if val:
-                        logger.info(
-                            "Downloaded avatar for user %s via profile photos (%d bytes)",
-                            user_id,
-                            len(val),
-                        )
-                        return val
+                val = await download_telegram_file_id(bot, best_photo.file_id)
+                if val:
+                    logger.info(
+                        "Downloaded avatar for user %s via profile photos (%d bytes)",
+                        user_id,
+                        len(val),
+                    )
+                    return val
         except Exception as e:
-            logger.info("Could not fetch profile photos for user %s: %s", user_id, e)
+            logger.warning("Could not fetch profile photos for user %s: %s", user_id, e)
 
         # 2. Try bot.get_chat(user_id).photo (works even when user restricts profile photos)
         try:
             chat = await bot.get_chat(chat_id=user_id)
             if chat and chat.photo and chat.photo.big_file_id:
-                file_info = await bot.get_file(chat.photo.big_file_id)
-                if file_info.file_path:
-                    stream = io.BytesIO()
-                    await bot.download_file(file_info.file_path, destination=stream)
-                    val = stream.getvalue()
-                    if val:
-                        logger.info(
-                            "Downloaded avatar for user %s via get_chat.photo (%d bytes)",
-                            user_id,
-                            len(val),
-                        )
-                        return val
-        except Exception as e:
-            logger.info("Could not fetch chat photo for user %s: %s", user_id, e)
-
-    # 3. Check if command message itself has a photo attached
-    if message and message.photo:
-        try:
-            best_photo = message.photo[-1]
-            file_info = await bot.get_file(best_photo.file_id)
-            if file_info.file_path:
-                stream = io.BytesIO()
-                await bot.download_file(file_info.file_path, destination=stream)
-                val = stream.getvalue()
+                val = await download_telegram_file_id(bot, chat.photo.big_file_id)
                 if val:
-                    logger.info("Using attached photo from command message (%d bytes)", len(val))
+                    logger.info(
+                        "Downloaded avatar for user %s via get_chat.photo (%d bytes)",
+                        user_id,
+                        len(val),
+                    )
                     return val
         except Exception as e:
-            logger.info("Could not download photo from message: %s", e)
+            logger.warning("Could not fetch chat photo for user %s: %s", user_id, e)
 
-    # 4. Check if replied message is or has a photo
+    # 3. Check if replied message is or has a photo
     if reply and reply.photo:
         try:
             best_photo = reply.photo[-1]
-            file_info = await bot.get_file(best_photo.file_id)
-            if file_info.file_path:
-                stream = io.BytesIO()
-                await bot.download_file(file_info.file_path, destination=stream)
-                val = stream.getvalue()
-                if val:
-                    logger.info("Using photo from replied message (%d bytes)", len(val))
-                    return val
+            val = await download_telegram_file_id(bot, best_photo.file_id)
+            if val:
+                logger.info("Using photo from replied message (%d bytes)", len(val))
+                return val
         except Exception as e:
-            logger.info("Could not download photo from replied message: %s", e)
+            logger.warning("Could not download photo from replied message: %s", e)
+
+    # 4. Check if command message itself has a photo attached
+    if message and message.photo:
+        try:
+            best_photo = message.photo[-1]
+            val = await download_telegram_file_id(bot, best_photo.file_id)
+            if val:
+                logger.info("Using attached photo from command message (%d bytes)", len(val))
+                return val
+        except Exception as e:
+            logger.warning("Could not download photo from message: %s", e)
 
     # 5. Check if forward was from a channel/supergroup with a chat photo
     if reply and reply.forward_from_chat and reply.forward_from_chat.photo:
         try:
-            file_info = await bot.get_file(reply.forward_from_chat.photo.big_file_id)
-            if file_info.file_path:
-                stream = io.BytesIO()
-                await bot.download_file(file_info.file_path, destination=stream)
-                val = stream.getvalue()
-                if val:
-                    logger.info("Using channel photo from forward (%d bytes)", len(val))
-                    return val
+            val = await download_telegram_file_id(bot, reply.forward_from_chat.photo.big_file_id)
+            if val:
+                logger.info("Using channel photo from forward (%d bytes)", len(val))
+                return val
         except Exception as e:
-            logger.info("Could not download channel photo: %s", e)
+            logger.warning("Could not download channel photo: %s", e)
 
-    logger.info("No avatar found for user_id=%s, falling back to noble monogram", user_id)
+    logger.warning("No avatar found for user_id=%s, falling back to noble monogram", user_id)
     return None
 
 
@@ -130,6 +110,8 @@ async def quote_command_handler(message: Message, bot: Bot) -> None:
             author_user_id = reply.forward_from.id
         elif reply.forward_sender_name:
             author_name = reply.forward_sender_name
+            if reply.from_user:
+                author_user_id = reply.from_user.id
         elif reply.from_user:
             author_name = reply.from_user.full_name
             author_user_id = reply.from_user.id

@@ -463,35 +463,7 @@ class QuoteGeneratorService:
         seal_rgba = np.zeros((size, size, 4), dtype=np.uint8)
         seal_rgba[:, :, :3] = rgb.astype(np.uint8)
         seal_rgba[:, :, 3] = (wax_mask * 255.0).astype(np.uint8)
-        seal_img = Image.fromarray(seal_rgba, mode="RGBA")
-
-        # 6. Multi-layer contact & cast shadow
-        pad = 35
-        total_dim = size + pad * 2
-        final_canvas = Image.new("RGBA", (total_dim, total_dim), (0, 0, 0, 0))
-
-        contact_sh = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        c_alpha = (wax_mask * 140.0).astype(np.uint8)
-        contact_sh.paste(
-            Image.new("RGBA", (size, size), (18, 12, 8, 255)),
-            (0, 0),
-            Image.fromarray(c_alpha, mode="L"),
-        )
-        contact_sh = contact_sh.filter(ImageFilter.GaussianBlur(5))
-        final_canvas.paste(contact_sh, (pad + 4, pad + 4), contact_sh)
-
-        cast_sh = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        cast_alpha = (wax_mask * 110.0).astype(np.uint8)
-        cast_sh.paste(
-            Image.new("RGBA", (size, size), (25, 16, 10, 255)),
-            (0, 0),
-            Image.fromarray(cast_alpha, mode="L"),
-        )
-        cast_sh = cast_sh.filter(ImageFilter.GaussianBlur(14))
-        final_canvas.paste(cast_sh, (pad + 16, pad + 20), cast_sh)
-
-        final_canvas.paste(seal_img, (pad, pad), seal_img)
-        return final_canvas
+        return Image.fromarray(seal_rgba, mode="RGBA")
 
     def _fit_text_to_bounds(
         self,
@@ -740,26 +712,7 @@ class QuoteGeneratorService:
             layer.paste(glyph_img, (int(curr_x - pad), int(y_baseline - pad_base)), glyph_img)
             curr_x += adv * 0.90
 
-        # 3D Molten Wax Seal with Gold Powder Dusting beside author signature
-        stamp_size = 350
-        stamp_img = self._generate_3d_wax_seal(
-            avatar_bytes,
-            clean_author,
-            base_wax_col,
-            powder_col,
-            size=stamp_size,
-            seed=base_seed,
-        )
-        stamp_x = int(min(curr_x + 35, self.canvas_w - stamp_size - 130))
-        stamp_y = int(author_base_y - int(stamp_size * 0.40))
-        # If signature extends too far right, position seal beneath signature
-        if stamp_x < curr_x + 10:
-            stamp_x = int(author_origin_x + 60)
-            stamp_y = int(author_base_y + 35)
-
-        layer.paste(stamp_img, (stamp_x, stamp_y), stamp_img)
-
-        # AUTHENTIC TEXTURE & CREASE INTERACTION
+        # 1. TEXT LAYER (Calligraphy & Dropcap)
         arr = np.array(layer, dtype=np.float32)
         alpha = arr[:, :, 3] / 255.0
 
@@ -775,10 +728,73 @@ class QuoteGeneratorService:
             arr[:, :, c] = np.clip(arr[:, :, c] * (cr_arr * 0.25 + 0.75), 0, 255)
 
         arr[:, :, 3] = final_alpha * 255.0
-        layer = Image.fromarray(arr.astype(np.uint8), mode="RGBA")
+        ink_layer = Image.fromarray(arr.astype(np.uint8), mode="RGBA")
 
-        # Composite with parchment background
-        final_img = Image.alpha_composite(bg, layer)
+        # 2. 3D WAX SEAL (Physical object sitting on parchment)
+        stamp_size = 350
+        seal_img = self._generate_3d_wax_seal(
+            avatar_bytes,
+            clean_author,
+            base_wax_col,
+            powder_col,
+            size=stamp_size,
+            seed=base_seed,
+        )
+        stamp_x = int(min(curr_x + 35, self.canvas_w - stamp_size - 130))
+        stamp_y = int(author_base_y - int(stamp_size * 0.40))
+        if stamp_x < curr_x + 10:
+            stamp_x = int(author_origin_x + 60)
+            stamp_y = int(author_base_y + 35)
+
+        # 3. MULTI-LAYER PHYSICAL DROP SHADOWS ONTO PARCHMENT
+        wax_alpha = np.array(seal_img)[:, :, 3].astype(np.float32) / 255.0
+
+        # Diffuse ambient penumbra shadow
+        pen_mask = Image.fromarray((wax_alpha * 95).astype(np.uint8), mode="L").filter(
+            ImageFilter.GaussianBlur(32)
+        )
+        pen_sh = Image.new("RGBA", (self.canvas_w, self.canvas_h), (0, 0, 0, 0))
+        pen_sh.paste(
+            Image.new("RGBA", seal_img.size, (28, 18, 12, 255)),
+            (stamp_x + 24, stamp_y + 36),
+            pen_mask,
+        )
+
+        # Directional body shadow (falling down-right)
+        body_mask = Image.fromarray((wax_alpha * 165).astype(np.uint8), mode="L").filter(
+            ImageFilter.GaussianBlur(16)
+        )
+        body_sh = Image.new("RGBA", (self.canvas_w, self.canvas_h), (0, 0, 0, 0))
+        body_sh.paste(
+            Image.new("RGBA", seal_img.size, (18, 12, 8, 255)),
+            (stamp_x + 14, stamp_y + 22),
+            body_mask,
+        )
+
+        # Deep contact occlusion right under the wax edge
+        contact_mask = Image.fromarray((wax_alpha * 210).astype(np.uint8), mode="L").filter(
+            ImageFilter.GaussianBlur(4)
+        )
+        contact_sh = Image.new("RGBA", (self.canvas_w, self.canvas_h), (0, 0, 0, 0))
+        contact_sh.paste(
+            Image.new("RGBA", seal_img.size, (10, 6, 4, 255)),
+            (stamp_x + 3, stamp_y + 4),
+            contact_mask,
+        )
+
+        # 4. COMPOSITING:
+        # A. Background parchment
+        # B. Seal cast shadows (ambient penumbra -> directional body -> contact occlusion)
+        # C. Calligraphy text ink layer
+        # D. 3D Wax Seal physical disc on top
+        final_img = Image.alpha_composite(bg, pen_sh)
+        final_img = Image.alpha_composite(final_img, body_sh)
+        final_img = Image.alpha_composite(final_img, contact_sh)
+        final_img = Image.alpha_composite(final_img, ink_layer)
+
+        seal_placement = Image.new("RGBA", (self.canvas_w, self.canvas_h), (0, 0, 0, 0))
+        seal_placement.paste(seal_img, (stamp_x, stamp_y), seal_img)
+        final_img = Image.alpha_composite(final_img, seal_placement)
 
         # Save to JPEG bytes
         import io
