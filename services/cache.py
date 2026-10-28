@@ -6,13 +6,9 @@ Provides high-performance L1 RAM LRU + L2 SQLite WAL storage to eliminate redund
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
-import os
 import re
-import sqlite3
-import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -22,6 +18,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from downloader.platforms.pinterest import resolve_pinterest_url
 from downloader.platforms.tiktok import resolve_tiktok_url
+from services.db_base import SQLiteWALService, resolve_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -66,18 +63,7 @@ _TW_NORM_RE = re.compile(
 
 def resolve_default_cache_db() -> str:
     """Resolve the default SQLite path, falling back to local working directory if data/ is not writable."""
-    env_path = os.getenv("MEDIA_CACHE_DB")
-    if env_path:
-        return env_path
-    data_dir = Path("data")
-    try:
-        data_dir.mkdir(parents=True, exist_ok=True)
-        test_file = data_dir / ".write_test"
-        test_file.touch()
-        test_file.unlink()
-        return "data/media_cache.db"
-    except (PermissionError, OSError):
-        return "media_cache.db"
+    return resolve_db_path("MEDIA_CACHE_DB", "media_cache.db", ".write_test")
 
 
 # Common tracking / referrer query parameters to strip
@@ -228,36 +214,22 @@ async def get_canonical_cache_key(
     return normalize_media_url(clean_url, platform=platform, quality=quality)
 
 
-class MediaCache:
+class MediaCache(SQLiteWALService):
     """
     Thread-safe two-tier (L1 RAM LRU + L2 SQLite WAL) persistent media cache
     mapping normalized URLs to Telegram file_ids.
     """
 
     def __init__(self, db_path: str | Path | None = None, l1_max_size: int = 512) -> None:
-        self.db_path = str(db_path) if db_path is not None else resolve_default_cache_db()
-        self._is_memory = self.db_path == ":memory:"
+        resolved = str(db_path) if db_path is not None else resolve_default_cache_db()
+        super().__init__(resolved)
         self._l1_max_size = l1_max_size
         self._l1_cache: OrderedDict[str, CachedMedia] = OrderedDict()
-        self._lock = threading.Lock()
-        self._conn = self._create_connection()
         self._init_db()
 
-    def _create_connection(self) -> sqlite3.Connection:
-        if not self._is_memory and not self.db_path.startswith("file:"):
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        if self.db_path.startswith("file:"):
-            return sqlite3.connect(self.db_path, uri=True, check_same_thread=False)
-        return sqlite3.connect(self.db_path, check_same_thread=False)
-
     def _init_db(self) -> None:
-        """Create database tables and set optimal PRAGMA settings."""
+        """Create database tables and indexes."""
         with self._lock:
-            if not self._is_memory:
-                self._conn.execute("PRAGMA journal_mode=WAL;")
-                self._conn.execute("PRAGMA synchronous=NORMAL;")
-                self._conn.execute("PRAGMA temp_store=MEMORY;")
-                self._conn.execute("PRAGMA cache_size=-4000;")
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS media_cache (
@@ -274,6 +246,9 @@ class MediaCache:
                 "CREATE INDEX IF NOT EXISTS idx_media_cache_created ON media_cache(created_at);"
             )
             self._conn.commit()
+
+    def _on_close(self) -> None:
+        self._l1_cache.clear()
 
     def _l1_put(self, entry: CachedMedia) -> None:
         self._l1_cache[entry.cache_key] = entry
@@ -414,10 +389,3 @@ class MediaCache:
         """Purge entries older than the specified retention window."""
         max_age_seconds = max_age_days * 86400.0
         return await asyncio.to_thread(self._sync_clear_expired, max_age_seconds)
-
-    def close(self) -> None:
-        """Close the underlying SQLite connection and clear L1 cache."""
-        with self._lock:
-            self._l1_cache.clear()
-            with contextlib.suppress(Exception):
-                self._conn.close()

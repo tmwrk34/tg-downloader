@@ -8,29 +8,29 @@ import asyncio
 import json
 import logging
 import re
-import threading
+import shutil
 import urllib.request
 import uuid
-from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from downloader.core import download_url_to_file
+from downloader.core import (
+    _DEFAULT_USER_AGENT as _USER_AGENT,
+)
+from downloader.core import (
+    _shortlink_cache as _shortlink_cache,
+)
+from downloader.core import (
+    download_url_to_file,
+    resolve_shortlink_url,
+)
 from downloader.models import DownloadedMedia
 from downloader.platforms.base import BasePlatformService
 from filters.patterns import MEDIA_PATTERNS, Platform
 
 logger = logging.getLogger(__name__)
 
-_SHORTLINK_CACHE_MAX = 512
-_shortlink_cache: OrderedDict[str, str] = OrderedDict()
-_shortlink_lock = threading.Lock()
-
 _PIN_ID_RE = re.compile(r"/pin/(?:[\w-]+--)?(\d+)")
-_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-)
 _RELAY_PAYLOAD_RE = re.compile(
     r'window\.__PWS_RELAY_REGISTER_COMPLETED_REQUEST__\s*\(\s*"[^"]*"\s*,\s*(\{.*?\})\s*\);',
     re.DOTALL,
@@ -39,30 +39,7 @@ _RELAY_PAYLOAD_RE = re.compile(
 
 def resolve_pinterest_url(url: str, timeout: int = 10) -> str:
     """Resolve Pinterest shortlinks (pin.it) to their canonical URL with thread-safe LRU caching."""
-    if "pin.it" not in url:
-        return url
-
-    with _shortlink_lock:
-        if url in _shortlink_cache:
-            _shortlink_cache.move_to_end(url)
-            return _shortlink_cache[url]
-
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": _USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            resolved = resp.geturl()
-        if resolved and resolved != url:
-            with _shortlink_lock:
-                _shortlink_cache[url] = resolved
-                if len(_shortlink_cache) > _SHORTLINK_CACHE_MAX:
-                    _shortlink_cache.popitem(last=False)
-        return resolved
-    except Exception as e:
-        logger.warning("Failed to resolve Pinterest shortlink %s: %s", url, e)
-        return url
+    return resolve_shortlink_url(url, ("pin.it",), timeout=timeout)
 
 
 def extract_pin_id(url: str) -> str | None:
@@ -382,7 +359,5 @@ class PinterestService(BasePlatformService):
             raise ValueError(f"No downloadable media formats found for Pinterest pin {pin_id}")
 
         except Exception:
-            for f in temp_dir.iterdir():
-                f.unlink(missing_ok=True)
-            temp_dir.rmdir()
+            shutil.rmtree(temp_dir, ignore_errors=True)
             raise

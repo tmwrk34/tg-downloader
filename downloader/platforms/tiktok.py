@@ -2,59 +2,30 @@ import asyncio
 import logging
 import re
 import shutil
-import threading
-import urllib.request
 import uuid
-from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
 import yt_dlp
 from yt_dlp.extractor.tiktok import TikTokIE
 
-from downloader.core import download_url_to_file
+from downloader.core import (
+    _shortlink_cache as _shortlink_cache,
+)
+from downloader.core import (
+    download_url_to_file,
+    resolve_shortlink_url,
+)
 from downloader.models import DownloadedMedia, MediaMetadata
 from downloader.platforms.base import BasePlatformService
 from filters.patterns import MEDIA_PATTERNS, Platform
 
 logger = logging.getLogger(__name__)
 
-_SHORTLINK_CACHE_MAX = 512
-_shortlink_cache: OrderedDict[str, str] = OrderedDict()
-_shortlink_lock = threading.Lock()
-
 
 def resolve_tiktok_url(url: str, timeout: int = 10) -> str:
     """Resolve TikTok shortlinks (vt.tiktok.com, vm.tiktok.com) to their canonical URL with LRU caching."""
-    if "vt.tiktok.com" not in url and "vm.tiktok.com" not in url:
-        return url
-
-    with _shortlink_lock:
-        if url in _shortlink_cache:
-            _shortlink_cache.move_to_end(url)
-            return _shortlink_cache[url]
-
-    try:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-                )
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            resolved = resp.geturl()
-        if resolved and resolved != url:
-            with _shortlink_lock:
-                _shortlink_cache[url] = resolved
-                if len(_shortlink_cache) > _SHORTLINK_CACHE_MAX:
-                    _shortlink_cache.popitem(last=False)
-        return resolved
-    except Exception as e:
-        logger.warning("Failed to resolve TikTok shortlink %s: %s", url, e)
-        return url
+    return resolve_shortlink_url(url, ("vt.tiktok.com", "vm.tiktok.com"), timeout=timeout)
 
 
 class TikTokService(BasePlatformService):

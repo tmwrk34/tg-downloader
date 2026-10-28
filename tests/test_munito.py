@@ -80,9 +80,15 @@ def test_markdown_to_telegram_html():
         "<pre><code class=\"language-python\">print('&lt;hello&gt;')\n</code></pre>" in html_block
     )
 
-    # Links
+    # Links (standard and URLs containing balanced parentheses like Wikipedia)
     md_link = "[Munito AI](https://munito.ai)"
     assert markdown_to_telegram_html(md_link) == '<a href="https://munito.ai">Munito AI</a>'
+
+    wiki_link = "[Kyiv](https://en.wikipedia.org/wiki/Kyiv_(disambiguation))"
+    assert (
+        markdown_to_telegram_html(wiki_link)
+        == '<a href="https://en.wikipedia.org/wiki/Kyiv_(disambiguation)">Kyiv</a>'
+    )
 
 
 def test_munito_is_configured():

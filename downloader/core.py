@@ -4,8 +4,10 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import urllib.request
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -15,14 +17,51 @@ from downloader.models import DownloadedMedia, MediaMetadata
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+)
+_SHORTLINK_CACHE_MAX = 512
+_shortlink_cache: OrderedDict[str, str] = OrderedDict()
+_shortlink_lock = threading.Lock()
+
+
+def resolve_shortlink_url(
+    url: str,
+    short_domains: tuple[str, ...],
+    timeout: int = 10,
+) -> str:
+    """Resolve platform shortlinks to their canonical URL with thread-safe LRU caching."""
+    if not any(domain in url for domain in short_domains):
+        return url
+
+    with _shortlink_lock:
+        if url in _shortlink_cache:
+            _shortlink_cache.move_to_end(url)
+            return _shortlink_cache[url]
+
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": _DEFAULT_USER_AGENT, "Accept-Language": "en-US,en;q=0.9"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resolved = resp.geturl()
+        if resolved and resolved != url:
+            with _shortlink_lock:
+                _shortlink_cache[url] = resolved
+                if len(_shortlink_cache) > _SHORTLINK_CACHE_MAX:
+                    _shortlink_cache.popitem(last=False)
+        return resolved
+    except Exception as e:
+        logger.warning("Failed to resolve shortlink %s: %s", url, e)
+        return url
+
 
 def download_url_to_file(url: str, dest_path: Path, timeout: int = 30) -> None:
     """Download a remote media URL directly to disk with a 64KB streaming buffer."""
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-        ),
+        "User-Agent": _DEFAULT_USER_AGENT,
         "Accept": "*/*",
     }
     req = urllib.request.Request(url, headers=headers)
