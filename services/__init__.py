@@ -13,6 +13,7 @@ from services.chatter import (
     clean_and_tokenize,
 )
 from services.dice import DiceParser, get_secret_roll, store_secret_roll
+from services.quote_generator import QuoteGeneratorService
 from services.worker import (
     MediaWorkerLimiter,
     chat_action_heartbeat,
@@ -27,6 +28,7 @@ __all__ = [
     "DiceParser",
     "MediaCache",
     "MediaWorkerLimiter",
+    "QuoteGeneratorService",
     "chat_action_heartbeat",
     "clean_and_tokenize",
     "get_canonical_cache_key",
