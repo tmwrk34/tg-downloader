@@ -526,10 +526,11 @@ class QuoteGeneratorService:
             # Rich deep black-sepia iron gall ink
             base_ink_rgb = np.array([12, 10, 8], dtype=np.float32)
 
-        pad = 28
-        pad_base = 80
-        cw = 110 + pad * 2
-        ch_h = 110 + pad * 2
+        font_sz = getattr(font, "size", 100)
+        pad = int(font_sz * 0.8)
+        pad_base = int(font_sz * 1.5)
+        cw = int(font_sz * 2.5) + pad * 2
+        ch_h = int(font_sz * 2.5) + pad * 2
         temp = Image.new("RGBA", (cw, ch_h), (0, 0, 0, 0))
         d = ImageDraw.Draw(temp)
 

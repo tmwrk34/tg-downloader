@@ -94,6 +94,22 @@ A high-performance Telegram bot built with **aiogram 3** and **yt-dlp** for down
   - `/ai effort <low|medium|high>` — Set reasoning effort level.
   - `/ai reset` — Reset chat token metrics.
 
+### 📜 Tavern Parchment Quote Generator (/q, /quote)
+- **Authentic Medieval Calligraphy Engine**:
+  - Transforms chat messages into 1792x2400 high-resolution medieval parchment scrolls with illuminated Botanical dropcaps and iron-gall ink.
+  - **Dynamic Typography & Auto-Scaling**: Tests font sizes from `116px` down to `36px` to fit 100% of quotes within template safe zones without truncation. Short quotes automatically scale up to large display sizes (`104px–116px`) and center vertically in the parchment's optical sweet spot.
+  - **4-Field Parchment Dispersion Simulation**: Perturbs handwriting along 5 noise fields coupled to parchment crease normal maps — generating natural line waves (`traj`), pen slant angles (`slant`), letter scale variations (`scale`), and calligraphic pen pressure (`press`) with dynamic font switching (`MarckScript` / `Caveat` / `BadScript`).
+  - **Physical Ink & Paper Wear**: Deep black iron-gall ink `(12, 10, 8)` with capillary feathering into paper fibers and realistic fading/abrasion over paper crease ridges.
+- **3D Molten Wax Signet Stamp (350px)**:
+  - **Avatar Relief Carving (Cameo Engraving)**: Extracts author's avatar and carves it into a 3D relief medallion — contours and dark features deboss deep into the molten wax, while uncarved surfaces are dusted with radiant metallic imperial gold powder `(238, 195, 50)`.
+  - **Organic Wax Matrix Physics**: Random harmonic puddle contours with cooling ripples, thick raised rim ridge, and Blinn-Phong specular wax sheen.
+  - **Realistic Multi-Layer Parchment Shadows**: Deep contact occlusion (tight edge shadow), directional body shadow (warm umber), and soft diffuse penumbra melting into paper folds.
+  - **Exhaustive Avatar Fetching**: Multi-tier downloading supporting user profile photos, `get_chat.photo`, command photo attachments, replied media, and local Telegram Bot API filesystem volumes.
+  - **Noble Monogram Fallback**: If no avatar is available, generates a Roman serif heraldic coat-of-arms with laurel wreath frame.
+- **Commands**:
+  - `/q` or `/quote` or `/цитата` — Reply to any user message to engrave it onto parchment.
+  - `/quote <text>` — Inscribe custom words as a quote scroll.
+
 ### 🔒 Security & Access Control
 - **Whitelist Middleware**: Restricts all interactions strictly to chat IDs specified in `ALLOWED_CHAT_IDS`. Unauthorized messages are dropped silently.
 - **Admin Authorization**: Configuration commands (`/chatter`, `/ai`) are strictly limited to chat administrators and bot superadmins.
@@ -114,7 +130,8 @@ tg-downloader/
 │   ├── downloader.py       # Media pipeline: URL detection, queueing, cache delivery, file upload
 │   ├── dice.py             # Tabletop dice roller: /roll, /dmroll, inline queries
 │   ├── chatter.py          # Tavern chatterbot settings card and callbacks
-│   └── ai.py               # Munito AI: mentions, /ai settings, vision, group message router
+│   ├── ai.py               # Munito AI: mentions, /ai settings, vision, group message router
+│   └── quote.py            # Tavern parchment quote scrolls (/q, /quote)
 │
 ├── downloader/             # Media extraction engine (yt-dlp wrappers and platform scrapers)
 │   ├── core.py             # MediaDownloaderCore (download, format selection, ffmpeg compression)
@@ -126,7 +143,8 @@ tg-downloader/
 │   ├── worker.py           # Concurrency limiting, bounded task queues, and singleflight locks
 │   ├── dice.py             # D&D dice formula parser and roll engine
 │   ├── chatter.py          # Markov chain text generator & vocabulary trainer (chatter.db)
-│   └── munito.py           # Munito AI client, HTML parser, and token accounting (ai.db)
+│   ├── munito.py           # Munito AI client, HTML parser, and token accounting (ai.db)
+│   └── quote_generator.py  # 1792x2400 calligraphy renderer, 3D wax seals, normal map dispersion
 │
 ├── filters/                # Declarative message filters (admin, dice, media URLs, triggers)
 ├── middlewares/            # Whitelist security middleware
