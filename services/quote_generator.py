@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import colorsys
 import hashlib
 import logging
 import math
 import os
+import random
 from typing import Any
 
 import numpy as np
@@ -14,11 +16,11 @@ logger = logging.getLogger(__name__)
 
 # Fallback noble medieval pigment palette (RGB)
 MEDIEVAL_PALETTE = [
-    (28, 70, 140),  # Royal Lapis Lazuli Blue
-    (142, 32, 38),  # Venetian Crimson Red
-    (26, 92, 58),  # Forest Emerald Green
-    (130, 78, 22),  # Burnished Amber Gold
-    (88, 40, 108),  # Imperial Purple
+    (28, 70, 150),  # Royal Lapis Lazuli Blue
+    (142, 28, 34),  # Venetian Crimson Red
+    (24, 96, 54),  # Forest Emerald Green
+    (138, 78, 18),  # Burnished Amber Gold
+    (84, 38, 112),  # Imperial Purple
 ]
 
 
@@ -51,7 +53,7 @@ class QuoteGeneratorService:
     def _get_template_data(self, template_name: str) -> dict[str, Any]:
         """Loads and pre-processes background, crease overlay, normal map, and fiber texture."""
         if template_name not in self.TEMPLATES:
-            template_name = "Dagger"
+            template_name = random.choice(self.TEMPLATES)
 
         if template_name in self._template_cache:
             return self._template_cache[template_name]
@@ -144,7 +146,6 @@ class QuoteGeneratorService:
         paper_fiber: np.ndarray,
     ) -> tuple[dict[str, np.ndarray], np.ndarray, np.ndarray]:
         """Builds 16-card 4-factor motor noise fields + 5-card normal-modulated ink texture dispersion."""
-        # 4 handwriting factors x 4 scales (16 maps)
         scales_4factors = {
             "traj": [1200, 600, 280, 110],
             "slant": [500, 250, 120, 60],
@@ -202,31 +203,39 @@ class QuoteGeneratorService:
 
     @staticmethod
     def extract_dominant_color(avatar_bytes: bytes | None, seed_str: str) -> tuple[int, int, int]:
-        """Extracts dominant noble color from avatar, or picks deterministic medieval palette fallback."""
-        if not avatar_bytes:
-            idx = int(hashlib.md5(seed_str.encode("utf-8")).hexdigest(), 16) % len(MEDIEVAL_PALETTE)
-            return MEDIEVAL_PALETTE[idx]
+        """Extracts dominant chromatic hue from avatar using HSV histogram, with noble medieval palette fallback."""
+        if avatar_bytes:
+            try:
+                import io
 
-        try:
-            import io
+                img = (
+                    Image.open(io.BytesIO(avatar_bytes))
+                    .convert("RGB")
+                    .resize((128, 128), Image.Resampling.LANCZOS)
+                )
+                arr = np.array(img, dtype=np.float32) / 255.0
+                hsv = np.zeros_like(arr)
+                for y in range(128):
+                    for x in range(128):
+                        hsv[y, x] = colorsys.rgb_to_hsv(arr[y, x, 0], arr[y, x, 1], arr[y, x, 2])
 
-            img = Image.open(io.BytesIO(avatar_bytes)).convert("RGB")
-            img = img.resize((64, 64), Image.Resampling.LANCZOS)
-            arr = np.array(img, dtype=np.float32)
-            # Find pixels with good saturation: max - min > 40
-            rgb_max = arr.max(axis=-1)
-            rgb_min = arr.min(axis=-1)
-            sat = rgb_max - rgb_min
-            valid_mask = (sat > 35) & (rgb_max > 50) & (rgb_min < 220)
+                h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+                # Weight by saturation and value to find true chromatic colors
+                weight = s * v * (s > 0.18) * (v > 0.18)
 
-            if np.any(valid_mask):
-                valid_pixels = arr[valid_mask]
-                mean_col = valid_pixels.mean(axis=0)
-                # Boost saturation slightly
-                mean_col = np.clip(mean_col * 1.1, 0, 255).astype(int)
-                return (int(mean_col[0]), int(mean_col[1]), int(mean_col[2]))
-        except Exception as e:
-            logger.debug("Failed extracting avatar color: %s", e)
+                if weight.sum() > 1e-2:
+                    bins = 24
+                    hist = np.zeros(bins)
+                    for b in range(bins):
+                        mask = (h >= b / bins) & (h < (b + 1) / bins)
+                        hist[b] = weight[mask].sum()
+
+                    best_h = (np.argmax(hist) + 0.5) / bins
+                    # Deep noble medieval saturation and value
+                    r, g, b = colorsys.hsv_to_rgb(best_h, 0.85, 0.52)
+                    return (int(r * 255), int(g * 255), int(b * 255))
+            except Exception as e:
+                logger.debug("Failed extracting avatar color: %s", e)
 
         idx = int(hashlib.md5(seed_str.encode("utf-8")).hexdigest(), 16) % len(MEDIEVAL_PALETTE)
         return MEDIEVAL_PALETTE[idx]
@@ -289,16 +298,17 @@ class QuoteGeneratorService:
         text: str,
         font: ImageFont.FreeTypeFont,
         max_full_w: int = 980,
-        max_indented_w: int = 740,
+        indent_w: int = 180,
         max_lines: int = 8,
     ) -> list[str]:
-        """Wraps text taking into account the illuminated drop-cap indent for the first 2 lines."""
+        """Wraps text taking into account the dynamic illuminated drop-cap indent for the first 2 lines."""
         raw_words = text.replace("\n", " ").split()
         if not raw_words:
             return ["..."]
 
         lines: list[str] = []
         curr_words: list[str] = []
+        max_indented_w = max_full_w - indent_w
 
         d = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
 
@@ -337,9 +347,10 @@ class QuoteGeneratorService:
         pressure: float = 1.0,
         base_ink_rgb: np.ndarray | None = None,
     ) -> tuple[Image.Image, float, int, int]:
-        """Renders single glyph with liquid ink physics and rotation anchored on the font baseline."""
+        """Renders single glyph with bold stroke weight, liquid ink physics, and baseline rotation."""
         if base_ink_rgb is None:
-            base_ink_rgb = np.array([28, 20, 16], dtype=np.float32)
+            # Rich deep iron-gall black ink
+            base_ink_rgb = np.array([8, 6, 5], dtype=np.float32)
 
         pad = 28
         pad_base = 80
@@ -347,18 +358,28 @@ class QuoteGeneratorService:
         ch_h = 110 + pad * 2
         temp = Image.new("RGBA", (cw, ch_h), (0, 0, 0, 0))
         d = ImageDraw.Draw(temp)
-        d.text((pad, pad_base), ch, font=font, fill=(0, 0, 0, 255), anchor="ls")
+
+        # Bold weight: stroke_width=1 makes cursive robust and crisp
+        d.text(
+            (pad, pad_base),
+            ch,
+            font=font,
+            fill=(0, 0, 0, 255),
+            anchor="ls",
+            stroke_width=1,
+            stroke_fill=(0, 0, 0, 255),
+        )
 
         arr = np.array(temp)
         alpha = arr[:, :, 3].astype(np.float32) / 255.0
         ink_rendered = np.zeros((ch_h, cw, 4), dtype=np.uint8)
 
         for c in range(3):
-            col = base_ink_rgb[c] * (1.20 - 0.35 * alpha * pressure)
+            col = base_ink_rgb[c] * (1.10 - 0.25 * alpha * pressure)
             ink_rendered[:, :, c] = np.clip(col, 0, 255).astype(np.uint8)
 
         ink_rendered[:, :, 3] = np.clip(
-            arr[:, :, 3] * np.clip(0.92 + pressure * 0.06, 0.88, 1.0),
+            arr[:, :, 3] * np.clip(0.95 + pressure * 0.05, 0.90, 1.0),
             0,
             255,
         ).astype(np.uint8)
@@ -380,15 +401,14 @@ class QuoteGeneratorService:
         avatar_bytes: bytes | None = None,
         template_name: str | None = None,
     ) -> bytes:
-        """Synchronously renders an authentic parchment quote card returning PNG bytes."""
+        """Synchronously renders an authentic parchment quote card returning JPEG bytes."""
         clean_text = text.strip()
         if not clean_text:
             clean_text = "..."
 
+        # If template not explicitly specified, pick randomly for variety
         if not template_name or template_name not in self.TEMPLATES:
-            # Deterministically choose template from text hash
-            h_val = int(hashlib.md5(clean_text.encode("utf-8")).hexdigest(), 16)
-            template_name = self.TEMPLATES[h_val % len(self.TEMPLATES)]
+            template_name = random.choice(self.TEMPLATES)
 
         tpl_data = self._get_template_data(template_name)
         bg = tpl_data["bg"].copy()
@@ -396,8 +416,8 @@ class QuoteGeneratorService:
         crease_intensity = tpl_data["crease_intensity"]
         paper_fiber = tpl_data["paper_fiber"]
 
-        # Base seed from quote content for reproducible handwriting trajectory
-        base_seed = int(hashlib.md5((clean_text + author_name).encode("utf-8")).hexdigest()[:8], 16)
+        # Base seed with random entropy so each invocation has fresh natural calligraphy
+        base_seed = random.randint(1000, 999999)
 
         p_comps, tex_erosion, crease_abrasion = self._build_noise_and_dispersion_fields(
             base_seed=base_seed,
@@ -425,17 +445,24 @@ class QuoteGeneratorService:
             body_text = body_text.lstrip(" ,.-—")
 
         # Fonts
-        font_dropcap = ImageFont.truetype(self.font_dropcap_path, 230)
-        base_font_sz = 74 if len(body_text) < 220 else 64
-        line_h = 96 if base_font_sz == 74 else 84
+        # Dropcap size 175 fits exactly within the first 2 text lines without invading line 3
+        font_dropcap = ImageFont.truetype(self.font_dropcap_path, 175)
+        base_font_sz = 76 if len(body_text) < 220 else 66
+        line_h = 96 if base_font_sz == 76 else 84
         font_marck = ImageFont.truetype(self.font_marck_path, base_font_sz)
 
-        # Wrap text
+        # Measure dropcap dimensions for dynamic indentation
+        d_dummy = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+        dc_bbox = d_dummy.textbbox((0, 0), dropcap_char, font=font_dropcap)
+        dc_w = dc_bbox[2] - dc_bbox[0]
+        indent_w = dc_w + 35
+
+        # Wrap text with dynamic dropcap indent for lines 0 and 1
         lines = self._wrap_text_for_parchment(
             body_text,
             font_marck,
             max_full_w=980,
-            max_indented_w=740,
+            indent_w=indent_w,
             max_lines=7,
         )
 
@@ -445,18 +472,20 @@ class QuoteGeneratorService:
         start_x = 420
         start_y = 660
 
-        # Draw illuminated dropcap
+        # Draw illuminated dropcap: top aligns with ascender top of Line 0
         dc_rgba = (dom_color[0], dom_color[1], dom_color[2], 255)
-        d_layer.text((start_x, start_y - 20), dropcap_char, font=font_dropcap, fill=dc_rgba)
+        dc_x = start_x
+        dc_y = start_y - 50 - dc_bbox[1]
+        d_layer.text((dc_x, dc_y), dropcap_char, font=font_dropcap, fill=dc_rgba)
 
         # Base slope (3.2 degrees)
         base_slope_deg = 3.2
         base_tan = math.tan(math.radians(base_slope_deg))
 
-        # Render cursive lines
+        # Render bold, crisp cursive lines
         for line_idx, line in enumerate(lines):
             line_base_y = start_y + line_idx * line_h
-            origin_x = start_x + 235 if line_idx < 2 else start_x + 14
+            origin_x = start_x + indent_w if line_idx < 2 else start_x + 10
             curr_x = float(origin_x)
             words = line.split(" ")
 
@@ -537,28 +566,25 @@ class QuoteGeneratorService:
         layer.paste(sh, (stamp_x + 4, stamp_y + 4), sh)
         layer.paste(stamp_img, (stamp_x, stamp_y), stamp_img)
 
-        # APPLY 5-CARD NORMAL DISPERSION & INK TEXTURE ABSORPTION
+        # APPLY IMPROVED HIGH-READABILITY TEXTURE & CREASE WEAR
         arr = np.array(layer, dtype=np.float32)
         alpha = arr[:, :, 3] / 255.0
 
-        # 1. Base alpha reduced directly across fold lines (abrasion on creases)
-        alpha_creased = alpha * (1.0 - crease_abrasion * 0.70)
+        # 1. Subtle crease abrasion: alpha only drops by up to 20% on folds, staying dark and legible
+        alpha_creased = alpha * (1.0 - crease_abrasion * 0.20)
 
-        # 2. Texture applied by the 5-card dispersion
-        tex_modulation = tex_erosion * 0.85
-        alpha_textured = alpha_creased * np.clip(1.0 + tex_modulation, 0.10, 1.30)
+        # 2. Subtle texture modulation: bounded [0.82, 1.10] so letters remain solid and bold
+        alpha_textured = alpha_creased * np.clip(1.0 + tex_erosion * 0.22, 0.82, 1.10)
 
         # 3. Micro-crack edge roughness
         edge = np.clip(alpha * 2.0, 0.0, 1.0) * np.clip((1.0 - alpha) * 2.0, 0.0, 1.0) * 4.0
-        edge_crack = tex_modulation * 0.50 * edge * (1.0 + crease_intensity)
+        edge_crack = tex_erosion * 0.25 * edge
         final_alpha = np.clip(alpha_textured + edge_crack, 0.0, 1.0)
 
-        # 4. Color fading & fold bleaching
+        # 4. Color: rich dark black ink with paper crease absorption
         for c in range(3):
-            arr[:, :, c] = np.clip(
-                arr[:, :, c] * (0.8 + 0.35 * final_alpha) + crease_abrasion * 35.0, 0, 255
-            )
-            arr[:, :, c] = np.clip(arr[:, :, c] * (cr_arr * 0.35 + 0.65), 0, 255)
+            arr[:, :, c] = np.clip(arr[:, :, c] * (0.88 + 0.12 * final_alpha), 0, 255)
+            arr[:, :, c] = np.clip(arr[:, :, c] * (cr_arr * 0.25 + 0.75), 0, 255)
 
         arr[:, :, 3] = final_alpha * 255.0
         layer = Image.fromarray(arr.astype(np.uint8), mode="RGBA")
@@ -566,11 +592,11 @@ class QuoteGeneratorService:
         # Composite with parchment background
         final_img = Image.alpha_composite(bg, layer)
 
-        # Save to PNG bytes
+        # Save to JPEG bytes
         import io
 
         buf = io.BytesIO()
-        final_img.convert("RGB").save(buf, format="JPEG", quality=92, optimize=True)
+        final_img.convert("RGB").save(buf, format="JPEG", quality=93, optimize=True)
         return buf.getvalue()
 
     async def async_render_quote(

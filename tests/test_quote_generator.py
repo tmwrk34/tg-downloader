@@ -42,7 +42,7 @@ def test_text_wrapping(quote_service: QuoteGeneratorService):
 
     font = ImageFont.truetype(quote_service.font_marck_path, 74)
     text = "Це довгий тестовий рядок для перевірки правильного розбиття слів на кілька рядків у манускрипті."
-    lines = quote_service._wrap_text_for_parchment(text, font, max_full_w=980, max_indented_w=740)
+    lines = quote_service._wrap_text_for_parchment(text, font, max_full_w=980, indent_w=180)
     assert len(lines) > 1
     # First line should be wrapped
     assert len(lines[0]) > 0
