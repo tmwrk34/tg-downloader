@@ -19,20 +19,98 @@ quote_router = Router(name="quote")
 quote_service = QuoteGeneratorService()
 
 
-async def _download_avatar_bytes(bot: Bot, user_id: int) -> bytes | None:
-    """Safely retrieves avatar photo bytes for a user, or None if unavailable."""
-    try:
-        photos = await bot.get_user_profile_photos(user_id=user_id, limit=1)
-        if photos and photos.photos and photos.photos[0]:
-            # Largest size in the first photo item
-            best_photo = photos.photos[0][-1]
+async def _download_avatar_bytes(
+    bot: Bot,
+    user_id: int | None,
+    reply: Message | None = None,
+    message: Message | None = None,
+) -> bytes | None:
+    """Exhaustively retrieves avatar photo bytes via profile photos, chat info, or attached media."""
+    # 1. Try bot.get_user_profile_photos
+    if user_id:
+        try:
+            photos = await bot.get_user_profile_photos(user_id=user_id, limit=1)
+            if photos and photos.photos and photos.photos[0]:
+                best_photo = photos.photos[0][-1]
+                file_info = await bot.get_file(best_photo.file_id)
+                if file_info.file_path:
+                    stream = io.BytesIO()
+                    await bot.download_file(file_info.file_path, destination=stream)
+                    val = stream.getvalue()
+                    if val:
+                        logger.info(
+                            "Downloaded avatar for user %s via profile photos (%d bytes)",
+                            user_id,
+                            len(val),
+                        )
+                        return val
+        except Exception as e:
+            logger.info("Could not fetch profile photos for user %s: %s", user_id, e)
+
+        # 2. Try bot.get_chat(user_id).photo (works even when user restricts profile photos)
+        try:
+            chat = await bot.get_chat(chat_id=user_id)
+            if chat and chat.photo and chat.photo.big_file_id:
+                file_info = await bot.get_file(chat.photo.big_file_id)
+                if file_info.file_path:
+                    stream = io.BytesIO()
+                    await bot.download_file(file_info.file_path, destination=stream)
+                    val = stream.getvalue()
+                    if val:
+                        logger.info(
+                            "Downloaded avatar for user %s via get_chat.photo (%d bytes)",
+                            user_id,
+                            len(val),
+                        )
+                        return val
+        except Exception as e:
+            logger.info("Could not fetch chat photo for user %s: %s", user_id, e)
+
+    # 3. Check if command message itself has a photo attached
+    if message and message.photo:
+        try:
+            best_photo = message.photo[-1]
             file_info = await bot.get_file(best_photo.file_id)
             if file_info.file_path:
                 stream = io.BytesIO()
                 await bot.download_file(file_info.file_path, destination=stream)
-                return stream.getvalue()
-    except Exception as e:
-        logger.debug("Could not download avatar for user %s: %s", user_id, e)
+                val = stream.getvalue()
+                if val:
+                    logger.info("Using attached photo from command message (%d bytes)", len(val))
+                    return val
+        except Exception as e:
+            logger.info("Could not download photo from message: %s", e)
+
+    # 4. Check if replied message is or has a photo
+    if reply and reply.photo:
+        try:
+            best_photo = reply.photo[-1]
+            file_info = await bot.get_file(best_photo.file_id)
+            if file_info.file_path:
+                stream = io.BytesIO()
+                await bot.download_file(file_info.file_path, destination=stream)
+                val = stream.getvalue()
+                if val:
+                    logger.info("Using photo from replied message (%d bytes)", len(val))
+                    return val
+        except Exception as e:
+            logger.info("Could not download photo from replied message: %s", e)
+
+    # 5. Check if forward was from a channel/supergroup with a chat photo
+    if reply and reply.forward_from_chat and reply.forward_from_chat.photo:
+        try:
+            file_info = await bot.get_file(reply.forward_from_chat.photo.big_file_id)
+            if file_info.file_path:
+                stream = io.BytesIO()
+                await bot.download_file(file_info.file_path, destination=stream)
+                val = stream.getvalue()
+                if val:
+                    logger.info("Using channel photo from forward (%d bytes)", len(val))
+                    return val
+        except Exception as e:
+            logger.info("Could not download channel photo: %s", e)
+
+    logger.info("No avatar found for user_id=%s, falling back to noble monogram", user_id)
     return None
 
 
@@ -91,9 +169,9 @@ async def quote_command_handler(message: Message, bot: Bot) -> None:
         logger.debug("Failed sending chat action: %s", e)
 
     # Download author avatar for wax signet
-    avatar_bytes: bytes | None = None
-    if author_user_id:
-        avatar_bytes = await _download_avatar_bytes(bot, author_user_id)
+    avatar_bytes: bytes | None = await _download_avatar_bytes(
+        bot, author_user_id, reply=reply, message=message
+    )
 
     # Render quote card asynchronously in threadpool
     try:

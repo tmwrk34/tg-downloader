@@ -50,11 +50,11 @@ TEMPLATE_CONFIGS: dict[str, dict[str, int]] = {
 
 # Authentic medieval noble duotones (Base Wax Color, Contrasting Powder Highlight)
 NOBLE_PAIRS: list[tuple[tuple[int, int, int], tuple[int, int, int]]] = [
-    ((24, 65, 145), (235, 185, 45)),  # Sapphire Blue Wax + Radiant Gold Powder
-    ((145, 24, 30), (230, 180, 50)),  # Venetian Crimson Wax + Ancient Gold Powder
-    ((22, 88, 48), (240, 190, 55)),  # Forest Emerald Wax + Solar Gold Powder
-    ((135, 75, 18), (245, 220, 120)),  # Burnished Amber Wax + Champagne Gold Powder
-    ((22, 24, 30), (215, 220, 230)),  # Obsidian Black Wax + Sterling Silver Powder
+    ((22, 62, 140), (238, 195, 50)),  # Royal Sapphire Blue Wax + Radiant Gold Powder
+    ((142, 22, 28), (235, 185, 45)),  # Venetian Crimson Wax + Ancient Gold Powder
+    ((20, 85, 45), (240, 190, 55)),  # Imperial Emerald Wax + Solar Gold Powder
+    ((68, 28, 110), (238, 192, 50)),  # Royal Amethyst Wax + Venetian Gold Powder
+    ((24, 25, 30), (220, 225, 235)),  # Obsidian Onyx Wax + Sterling Silver Powder
 ]
 
 
@@ -256,7 +256,7 @@ class QuoteGeneratorService:
                         hsv[y, x] = colorsys.rgb_to_hsv(arr[y, x, 0], arr[y, x, 1], arr[y, x, 2])
 
                 h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
-                weight = s * v * (s > 0.18) * (v > 0.18)
+                weight = s * v * (s > 0.16) * (v > 0.16)
 
                 if weight.sum() > 1e-2:
                     bins = 24
@@ -266,13 +266,18 @@ class QuoteGeneratorService:
                         hist[b] = weight[mask].sum()
 
                     best_h = (np.argmax(hist) + 0.5) / bins
-                    r1, g1, b1 = colorsys.hsv_to_rgb(best_h, 0.85, 0.52)
-                    contrast_h = (best_h + 0.5) % 1.0
-                    r2, g2, b2 = colorsys.hsv_to_rgb(contrast_h, 0.75, 0.90)
-                    return (
-                        (int(r1 * 255), int(g1 * 255), int(b1 * 255)),
-                        (int(r2 * 255), int(g2 * 255), int(b2 * 255)),
-                    )
+                    # Deep jewel-toned wax color
+                    r1, g1, b1 = colorsys.hsv_to_rgb(best_h, 0.88, 0.52)
+                    base_wax = (int(r1 * 255), int(g1 * 255), int(b1 * 255))
+
+                    # Radiant noble gold powder dusting as default contrasting metallic coat
+                    # If avatar itself is primarily golden-yellow (0.10 <= best_h <= 0.18), use sterling silver powder
+                    if 0.10 <= best_h <= 0.18:
+                        powder = (220, 225, 238)  # Sterling Silver Powder
+                    else:
+                        powder = (238, 195, 50)  # Radiant Imperial Gold Powder
+
+                    return (base_wax, powder)
             except Exception as e:
                 logger.debug("Failed extracting avatar colors: %s", e)
 
@@ -285,7 +290,7 @@ class QuoteGeneratorService:
         author_name: str,
         base_color: tuple[int, int, int],
         powder_color: tuple[int, int, int],
-        size: int = 210,
+        size: int = 350,
         seed: int = 42,
     ) -> Image.Image:
         """Generates authentic 3D molten wax seal with organic rims, debossed valleys, and contrasting powder."""
@@ -299,127 +304,194 @@ class QuoteGeneratorService:
         dist = np.sqrt(dx**2 + dy**2)
         angle = np.arctan2(dy, dx)
 
-        # Organic molten wax blob radius with harmonic waves
-        base_r = size * 0.42
-        blob_r = base_r * (
+        # 1. Organic molten wax puddle contour with viscous ripples
+        base_r = size * 0.43
+        puddle_r = base_r * (
             1.0
-            + 0.06 * np.cos(3 * angle + random.uniform(0, math.pi))
+            + 0.07 * np.cos(3 * angle + random.uniform(0, math.pi))
             + 0.05 * np.cos(5 * angle + random.uniform(0, math.pi))
-            + 0.03 * np.cos(7 * angle + random.uniform(0, math.pi))
             + 0.04 * np.sin(2 * angle + random.uniform(0, math.pi))
+            + 0.03 * np.cos(7 * angle + random.uniform(0, math.pi))
+            + 0.02 * np.sin(11 * angle + random.uniform(0, math.pi))
         )
 
-        rim_mask = np.clip((blob_r - dist) / 5.0, 0.0, 1.0)
-        ridge_dist = base_r * 0.78
-        ridge_h = np.exp(-((dist - ridge_dist) ** 2) / (2 * (14.0**2))) * 0.45
-        basin_r = base_r * 0.70
+        edge_width = 8.0
+        wax_mask = np.clip((puddle_r - dist) / edge_width, 0.0, 1.0)
+        wax_mask = wax_mask * wax_mask * (3.0 - 2.0 * wax_mask)
 
-        # Debossed emblem / monogram
-        emblem_mask = np.zeros((size, size), dtype=np.float32)
+        # 2. Height field Z(x, y)
+        height = np.zeros((size, size), dtype=np.float32)
+
+        # Meniscus rise from puddle edge to rim
+        meniscus = np.clip((puddle_r - dist) / (size * 0.12), 0.0, 1.0)
+        height += np.sin(meniscus * math.pi * 0.5) * 0.55
+
+        # Thick raised rim ridge where brass matrix pushed molten wax up
+        ridge_center = base_r * 0.76
+        ridge_sigma = 18.0
+        ridge = np.exp(-((dist - ridge_center) ** 2) / (2 * (ridge_sigma**2))) * 0.55
+        height += ridge
+
+        # Sunken inner basin where stamp face pressed down
+        basin_r = base_r * 0.68
+        in_basin = dist < basin_r
+        basin_depth = np.clip((basin_r - dist) / 10.0, 0.0, 1.0)
+        height -= basin_depth * 0.48
+
+        # Beaded signet concentric rings at basin perimeter
+        ring_r = basin_r * 0.94
+        ring = np.exp(-((dist - ring_r) ** 2) / (2 * (3.5**2))) * 0.22
+        inner_ring_r = basin_r * 0.88
+        inner_ring = np.exp(-((dist - inner_ring_r) ** 2) / (2 * (2.5**2))) * 0.18
+        height += (ring + inner_ring) * in_basin
+
+        # 3. Engraved Artwork in Basin (Avatar relief or noble monogram)
+        engrave_depth = np.zeros((size, size), dtype=np.float32)
+
         if avatar_bytes:
             try:
                 import io
 
-                av = (
-                    Image.open(io.BytesIO(avatar_bytes))
-                    .convert("L")
-                    .resize((int(basin_r * 1.8), int(basin_r * 1.8)), Image.Resampling.LANCZOS)
+                av_orig = Image.open(io.BytesIO(avatar_bytes)).convert("L")
+                w_av, h_av = av_orig.size
+                min_side = min(w_av, h_av)
+                left = (w_av - min_side) // 2
+                top = (h_av - min_side) // 2
+                av_sq = av_orig.crop((left, top, left + min_side, top + min_side))
+
+                box_dim = int(basin_r * 1.68)
+                av_resized = av_sq.resize((box_dim, box_dim), Image.Resampling.LANCZOS)
+                av_arr = np.array(av_resized, dtype=np.float32) / 255.0
+
+                p2, p98 = np.percentile(av_arr, (2, 98))
+                av_norm = np.clip((av_arr - p2) / (p98 - p2 + 1e-5), 0.0, 1.0)
+
+                blur_img = av_resized.filter(ImageFilter.GaussianBlur(3))
+                blur_arr = np.array(blur_img, dtype=np.float32) / 255.0
+                high_pass = np.clip((av_norm - blur_arr) * 2.2, -1.0, 1.0)
+
+                edges_img = av_resized.filter(ImageFilter.FIND_EDGES)
+                edges_arr = np.array(edges_img, dtype=np.float32) / 255.0
+
+                carve = (
+                    (1.0 - av_norm) * 0.65 + edges_arr * 0.50 + np.clip(-high_pass, 0.0, 1.0) * 0.35
                 )
-                av_arr = np.array(av, dtype=np.float32) / 255.0
-                av_arr = (av_arr - av_arr.min()) / (av_arr.max() - av_arr.min() + 1e-6)
-                pw, ph = av.size
-                px = int(center - pw / 2)
-                py = int(center - ph / 2)
-                av_high = av_arr - np.array(av.filter(ImageFilter.GaussianBlur(3))) / 255.0
-                av_emb = np.clip(av_high * 2.5 + 0.5, 0.0, 1.0)
-                sub = np.zeros((size, size), dtype=np.float32)
-                sub[py : py + ph, px : px + pw] = av_emb
-                emblem_mask = sub * (dist < (basin_r * 0.92))
-            except Exception:
+                carve = np.clip(carve, 0.0, 1.0)
+
+                sub_mask = np.zeros((size, size), dtype=np.float32)
+                px = int(center - box_dim // 2)
+                py = int(center - box_dim // 2)
+                sub_mask[py : py + box_dim, px : px + box_dim] = carve
+                engrave_depth = sub_mask * (dist < (basin_r * 0.84))
+            except Exception as e:
+                logger.debug("Failed processing avatar relief for seal: %s", e)
                 avatar_bytes = None
 
         if not avatar_bytes:
-            mono_img = Image.new("L", (size, size), 255)
+            mono_img = Image.new("L", (size, size), 0)
             d_m = ImageDraw.Draw(mono_img)
             initial = (author_name.strip()[:1] or "К").upper()
-            f_size = int(basin_r * 1.1)
+            f_size = int(basin_r * 1.15)
             font = ImageFont.truetype(self.font_cormorant_path, f_size)
-            d_m.text((int(center), int(center) - 4), initial, font=font, fill=0, anchor="mm")
+            d_m.text((int(center), int(center) - 4), initial, font=font, fill=255, anchor="mm")
             d_m.ellipse(
                 (
-                    center - basin_r * 0.92,
-                    center - basin_r * 0.92,
-                    center + basin_r * 0.92,
-                    center + basin_r * 0.92,
+                    center - basin_r * 0.85,
+                    center - basin_r * 0.85,
+                    center + basin_r * 0.85,
+                    center + basin_r * 0.85,
                 ),
-                outline=0,
+                outline=255,
                 width=4,
             )
             d_m.ellipse(
                 (
-                    center - basin_r * 0.82,
-                    center - basin_r * 0.82,
-                    center + basin_r * 0.82,
-                    center + basin_r * 0.82,
+                    center - basin_r * 0.77,
+                    center - basin_r * 0.77,
+                    center + basin_r * 0.77,
+                    center + basin_r * 0.77,
                 ),
-                outline=0,
+                outline=255,
                 width=2,
             )
             mono_arr = np.array(mono_img, dtype=np.float32) / 255.0
-            emblem_mask = (1.0 - mono_arr) * (dist < (basin_r * 0.95))
+            engrave_depth = mono_arr * (dist < (basin_r * 0.86))
 
-        H_seal = (rim_mask * 0.65 + ridge_h) - emblem_mask * 0.28
-        H_seal = np.clip(H_seal, 0.0, 1.5)
+        height -= engrave_depth * 0.32
 
-        # 3D Normal & Lighting
-        gy, gx = np.gradient(H_seal * 16.0)
-        norm_len = np.sqrt(gx**2 + gy**2 + 1.0)
-        nx, ny, nz = -gx / norm_len, -gy / norm_len, 1.0 / norm_len
+        # Meniscus smoothing
+        h_min, h_max = height.min(), height.max()
+        h_u = np.clip((height - h_min) / (h_max - h_min + 1e-6) * 255.0, 0, 255).astype(np.uint8)
+        h_img = Image.fromarray(h_u, mode="L").filter(ImageFilter.GaussianBlur(1.5))
+        h_smooth = np.array(h_img, dtype=np.float32) / 255.0 * (h_max - h_min) + h_min
 
-        lx, ly, lz = -0.55, -0.55, 0.63
+        # 4. Normal map & 3D Lighting
+        gy, gx = np.gradient(h_smooth * 35.0)
+        nz = np.ones_like(gx)
+        n_len = np.sqrt(gx**2 + gy**2 + nz**2)
+        nx, ny, nz = -gx / n_len, -gy / n_len, nz / n_len
+
+        lx, ly, lz = -0.55, -0.65, 0.75
         l_len = math.sqrt(lx**2 + ly**2 + lz**2)
         lx, ly, lz = lx / l_len, ly / l_len, lz / l_len
         diffuse = np.clip(nx * lx + ny * ly + nz * lz, 0.0, 1.0)
 
         hx, hy, hz = lx, ly, lz + 1.0
         h_len = math.sqrt(hx**2 + hy**2 + hz**2)
-        specular = (
-            np.clip(nx * (hx / h_len) + ny * (hy / h_len) + nz * (hz / h_len), 0.0, 1.0) ** 14.0
-        )
-        ao = np.clip(1.0 - (gx**2 + gy**2) * 0.08, 0.45, 1.0)
+        hx, hy, hz = hx / h_len, hy / h_len, hz / h_len
+        ndoth = np.clip(nx * hx + ny * hy + nz * hz, 0.0, 1.0)
+        specular = ndoth**22.0
 
-        powder_noise = np.random.uniform(0.85, 1.15, (size, size))
-        powder_weight = np.clip((1.0 - emblem_mask * 1.8), 0.0, 1.0) * (dist < (basin_r * 0.88))
+        ao = np.clip(1.0 - (gx**2 + gy**2) * 0.04 - engrave_depth * 0.25, 0.35, 1.0)
+
+        # 5. Contrasting powder dusting on raised un-engraved surfaces
+        powder_noise = np.random.uniform(0.88, 1.12, (size, size))
+        plateau_mask = np.clip(1.0 - engrave_depth * 2.2, 0.0, 1.0) * (dist < (basin_r * 0.90))
+        powder_weight = plateau_mask * 0.92
 
         rgb = np.zeros((size, size, 3), dtype=np.float32)
         base_col = np.array(base_color, dtype=np.float32)
         powd_col = np.array(powder_color, dtype=np.float32)
 
         for c in range(3):
-            wax_col = base_col[c] * (diffuse * 0.70 + 0.35) * ao * (1.0 - emblem_mask * 0.35)
-            p_col = powd_col[c] * (diffuse * 0.85 + 0.25) * powder_noise
-            blended = wax_col * (1.0 - powder_weight) + p_col * powder_weight + specular * 140.0
-            rgb[:, :, c] = np.clip(blended, 0.0, 255.0)
+            wax = base_col[c] * (diffuse * 0.70 + 0.38) * ao
+            powder = powd_col[c] * (diffuse * 0.85 + 0.30) * powder_noise
+            surface = wax * (1.0 - powder_weight) + powder * powder_weight
+            surface += specular * 165.0
+            rgb[:, :, c] = np.clip(surface, 0.0, 255.0)
 
         seal_rgba = np.zeros((size, size, 4), dtype=np.uint8)
         seal_rgba[:, :, :3] = rgb.astype(np.uint8)
-        seal_rgba[:, :, 3] = np.clip(rim_mask * 255.0, 0, 255).astype(np.uint8)
+        seal_rgba[:, :, 3] = (wax_mask * 255.0).astype(np.uint8)
         seal_img = Image.fromarray(seal_rgba, mode="RGBA")
 
-        # Soft cast shadow
-        shadow = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        sh_arr = (rim_mask * 110.0).astype(np.uint8)
-        shadow.paste(
-            Image.new("RGBA", (size, size), (15, 10, 8, 255)),
-            (0, 0),
-            Image.fromarray(sh_arr, mode="L"),
-        )
-        shadow = shadow.filter(ImageFilter.GaussianBlur(8))
+        # 6. Multi-layer contact & cast shadow
+        pad = 35
+        total_dim = size + pad * 2
+        final_canvas = Image.new("RGBA", (total_dim, total_dim), (0, 0, 0, 0))
 
-        final_stamp = Image.new("RGBA", (size + 20, size + 20), (0, 0, 0, 0))
-        final_stamp.paste(shadow, (14, 14), shadow)
-        final_stamp.paste(seal_img, (6, 6), seal_img)
-        return final_stamp
+        contact_sh = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        c_alpha = (wax_mask * 140.0).astype(np.uint8)
+        contact_sh.paste(
+            Image.new("RGBA", (size, size), (18, 12, 8, 255)),
+            (0, 0),
+            Image.fromarray(c_alpha, mode="L"),
+        )
+        contact_sh = contact_sh.filter(ImageFilter.GaussianBlur(5))
+        final_canvas.paste(contact_sh, (pad + 4, pad + 4), contact_sh)
+
+        cast_sh = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        cast_alpha = (wax_mask * 110.0).astype(np.uint8)
+        cast_sh.paste(
+            Image.new("RGBA", (size, size), (25, 16, 10, 255)),
+            (0, 0),
+            Image.fromarray(cast_alpha, mode="L"),
+        )
+        cast_sh = cast_sh.filter(ImageFilter.GaussianBlur(14))
+        final_canvas.paste(cast_sh, (pad + 16, pad + 20), cast_sh)
+
+        final_canvas.paste(seal_img, (pad, pad), seal_img)
+        return final_canvas
 
     def _fit_text_to_bounds(
         self,
@@ -431,17 +503,17 @@ class QuoteGeneratorService:
     ) -> tuple[
         list[str], ImageFont.FreeTypeFont, int, int, ImageFont.FreeTypeFont, tuple[int, ...], int
     ]:
-        """Dynamically scales font size to fit 100% of the quote within template bounds without truncation."""
+        """Dynamically scales font size from 116px down to 36px to fit 100% of quote within template bounds."""
         d_meas = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
         raw_words = text.replace("\n", " ").split()
 
-        for sz in [74, 66, 58, 52, 46, 42, 38]:
+        for sz in [116, 104, 94, 84, 76, 68, 60, 52, 46, 40, 36]:
             font = ImageFont.truetype(font_path, sz)
-            line_h = int(sz * 1.30)
-            dc_sz = int(sz * 2.3)
+            line_h = int(sz * 1.34)
+            dc_sz = int(sz * 2.2)
             f_dc = ImageFont.truetype(self.font_dropcap_path, dc_sz)
             dc_box = d_meas.textbbox((0, 0), dropcap_char, font=f_dc)
-            indent_w = (dc_box[2] - dc_box[0]) + 30
+            indent_w = (dc_box[2] - dc_box[0]) + 35
 
             lines: list[str] = []
             curr: list[str] = []
@@ -583,8 +655,13 @@ class QuoteGeneratorService:
         layer = Image.new("RGBA", (self.canvas_w, self.canvas_h), (0, 0, 0, 0))
         d_layer = ImageDraw.Draw(layer)
 
+        # Dynamic vertical balancing for short text: center within safe zone
+        stamp_size = 350
+        total_quote_h = len(lines) * line_h + 160
+        avail_h = cfg["max_h"] - total_quote_h
+        vert_offset = int(max(0, avail_h) * 0.35)
         start_x = cfg["start_x"]
-        start_y = cfg["start_y"]
+        start_y = cfg["start_y"] + vert_offset
 
         # Draw illuminated dropcap: Sapphire Blue base wax tone, aligned with Line 0 top
         dc_rgba = (base_wax_col[0], base_wax_col[1], base_wax_col[2], 255)
@@ -664,7 +741,7 @@ class QuoteGeneratorService:
             curr_x += adv * 0.90
 
         # 3D Molten Wax Seal with Gold Powder Dusting beside author signature
-        stamp_size = 200
+        stamp_size = 350
         stamp_img = self._generate_3d_wax_seal(
             avatar_bytes,
             clean_author,
@@ -673,8 +750,13 @@ class QuoteGeneratorService:
             size=stamp_size,
             seed=base_seed,
         )
-        stamp_x = int(min(curr_x + 35, self.canvas_w - stamp_size - 180))
-        stamp_y = int(author_base_y - 70)
+        stamp_x = int(min(curr_x + 35, self.canvas_w - stamp_size - 130))
+        stamp_y = int(author_base_y - int(stamp_size * 0.40))
+        # If signature extends too far right, position seal beneath signature
+        if stamp_x < curr_x + 10:
+            stamp_x = int(author_origin_x + 60)
+            stamp_y = int(author_base_y + 35)
+
         layer.paste(stamp_img, (stamp_x, stamp_y), stamp_img)
 
         # AUTHENTIC TEXTURE & CREASE INTERACTION
