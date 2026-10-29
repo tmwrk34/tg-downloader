@@ -233,6 +233,7 @@ class QuoteGeneratorService:
         powder_color: tuple[int, int, int],
         size: int = 350,
         seed: int = 42,
+        fallback_initial: str = "М",
     ) -> Image.Image:
         """Delegate 3D wax seal rendering to `services.wax_seal`."""
         return render_3d_wax_seal(
@@ -243,6 +244,7 @@ class QuoteGeneratorService:
             font_cormorant_path=self.font_cormorant_path,
             size=size,
             seed=seed,
+            fallback_initial=fallback_initial,
         )
 
     def _fit_text_to_bounds(
@@ -368,6 +370,7 @@ class QuoteGeneratorService:
         template_name: str | None = None,
         show_seal: bool = True,
         show_dropcap: bool = True,
+        fallback_initial: str = "М",
     ) -> bytes:
         """Synchronously render an authentic parchment quote card returning JPEG bytes."""
         clean_text = text.strip() or "..."
@@ -518,6 +521,7 @@ class QuoteGeneratorService:
                 powder_col,
                 size=stamp_size,
                 seed=base_seed,
+                fallback_initial=fallback_initial,
             )
             stamp_x = int(min(curr_x + 35, self.canvas_w - stamp_size - 130))
             stamp_y = int(author_base_y - int(stamp_size * 0.40))
@@ -551,6 +555,7 @@ class QuoteGeneratorService:
         template_name: str | None = None,
         show_seal: bool = True,
         show_dropcap: bool = True,
+        fallback_initial: str = "М",
     ) -> bytes:
         """Asynchronously execute quote rendering in threadpool without blocking event loop."""
         return await asyncio.to_thread(
@@ -561,6 +566,7 @@ class QuoteGeneratorService:
             template_name,
             show_seal=show_seal,
             show_dropcap=show_dropcap,
+            fallback_initial=fallback_initial,
         )
 
 

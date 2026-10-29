@@ -388,3 +388,39 @@ async def test_quote_author_suppression_reply():
         assert kwargs["author_name"] == ""
         assert kwargs["show_seal"] is False
         assert kwargs["show_dropcap"] is False
+
+
+@pytest.mark.asyncio
+async def test_quote_author_suppression_with_seal_fetches_avatar():
+    bot = create_mock_bot()
+    replied_user = create_user(user_id=888, name="Illya Chuhalo")
+    replied_msg = create_message(text="Текст цитати для сувою.", user=replied_user)
+    cmd_msg = create_message(text="/qfb -", reply_to=replied_msg)
+    fake_avatar = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+    fake_jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 1000
+
+    with (
+        patch(
+            "handlers.quote._download_avatar_bytes", new_callable=AsyncMock
+        ) as mock_download_avatar,
+        patch(
+            "handlers.quote.quote_service.async_render_quote", new_callable=AsyncMock
+        ) as mock_render,
+    ):
+        mock_download_avatar.return_value = fake_avatar
+        mock_render.return_value = fake_jpeg
+        await quote_command_handler(cmd_msg, bot)
+
+        mock_download_avatar.assert_awaited_once()
+        # Verify author_user_id passed to avatar downloader is the replied user id
+        assert mock_download_avatar.call_args[0][1] == 888
+
+        mock_render.assert_awaited_once()
+        kwargs = mock_render.call_args.kwargs
+        assert kwargs["text"] == "Текст цитати для сувою."
+        assert kwargs["author_name"] == ""
+        assert kwargs["avatar_bytes"] == fake_avatar
+        assert kwargs["template_name"] == "Basic"
+        assert kwargs["show_seal"] is True
+        assert kwargs["show_dropcap"] is False
+        assert kwargs["fallback_initial"] == "I"

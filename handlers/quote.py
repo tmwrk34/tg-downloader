@@ -282,29 +282,47 @@ async def quote_command_handler(
     target_text = ""
     author_name = ""
     author_user_id: int | None = None
+    user_initial: str = "М"
 
     if reply:
-        # Replying to another message (or image)
+        # Determine user ID and initial for wax seal avatar / monogram
+        if reply.forward_from:
+            author_user_id = reply.forward_from.id
+            if reply.forward_from.first_name:
+                user_initial = reply.forward_from.first_name[:1].upper()
+            default_author = reply.forward_from.full_name
+        elif reply.forward_sender_name:
+            user_initial = reply.forward_sender_name[:1].upper()
+            default_author = reply.forward_sender_name
+            if reply.from_user:
+                author_user_id = reply.from_user.id
+        elif reply.from_user:
+            author_user_id = reply.from_user.id
+            if reply.from_user.first_name:
+                user_initial = reply.from_user.first_name[:1].upper()
+            default_author = reply.from_user.full_name
+        else:
+            default_author = "Мандрівник"
+            user_initial = "М"
+            if message.from_user:
+                author_user_id = message.from_user.id
+
         if raw_args:
             # Custom text provided in command message (e.g. letter over replied image)
             target_text = raw_args
+            if reply.photo:
+                # User wrote text for a letter with replied photo as seal; command sender is author
+                author_user_id = message.from_user.id if message.from_user else author_user_id
+                if message.from_user and message.from_user.first_name:
+                    user_initial = message.from_user.first_name[:1].upper()
+                default_author = message.from_user.full_name if message.from_user else "Мандрівник"
+
             if suppress_author:
                 author_name = ""
             elif explicit_author:
                 author_name = explicit_author
-            elif reply.photo:
-                # User wrote text for a letter with replied photo as seal
-                author_name = message.from_user.full_name if message.from_user else "Мандрівник"
-                author_user_id = message.from_user.id if message.from_user else None
-            elif reply.forward_from:
-                author_name = reply.forward_from.full_name
-                author_user_id = reply.forward_from.id
-            elif reply.from_user:
-                author_name = reply.from_user.full_name
-                author_user_id = reply.from_user.id
             else:
-                author_name = message.from_user.full_name if message.from_user else "Мандрівник"
-                author_user_id = message.from_user.id if message.from_user else None
+                author_name = default_author
         else:
             # Quoting replied message content
             target_text = reply.text or reply.caption or ""
@@ -312,31 +330,27 @@ async def quote_command_handler(
                 author_name = ""
             elif explicit_author:
                 author_name = explicit_author
-            elif reply.forward_from:
-                author_name = reply.forward_from.full_name
-                author_user_id = reply.forward_from.id
-            elif reply.forward_sender_name:
-                author_name = reply.forward_sender_name
-                if reply.from_user:
-                    author_user_id = reply.from_user.id
-            elif reply.from_user:
-                author_name = reply.from_user.full_name
-                author_user_id = reply.from_user.id
             else:
-                author_name = "Мандрівник"
+                author_name = default_author
     else:
         # Command used standalone with text argument
+        if message.from_user:
+            author_user_id = message.from_user.id
+            if message.from_user.first_name:
+                user_initial = message.from_user.first_name[:1].upper()
+            default_author = message.from_user.full_name
+        else:
+            default_author = "Мандрівник"
+            user_initial = "М"
+
         if raw_args:
             target_text = raw_args
             if suppress_author:
                 author_name = ""
             elif explicit_author:
                 author_name = explicit_author
-            elif message.from_user:
-                author_name = message.from_user.full_name
-                author_user_id = message.from_user.id
             else:
-                author_name = "Мандрівник"
+                author_name = default_author
         else:
             usage_msg = (
                 "📜 <b>Як створити сувій цитати або лист:</b>\n\n"
@@ -399,6 +413,7 @@ async def quote_command_handler(
             template_name=template_name,
             show_seal=show_seal,
             show_dropcap=show_dropcap,
+            fallback_initial=user_initial,
         )
 
         photo = BufferedInputFile(img_bytes, filename="quote.jpg")

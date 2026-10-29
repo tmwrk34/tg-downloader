@@ -79,6 +79,7 @@ def render_3d_wax_seal(
     font_cormorant_path: str,
     size: int = 350,
     seed: int = 42,
+    fallback_initial: str = "М",
 ) -> Image.Image:
     """Generate authentic 3D molten wax seal with organic rims, debossed valleys, and contrasting powder."""
     np.random.seed(seed)
@@ -169,7 +170,7 @@ def render_3d_wax_seal(
     if not avatar_bytes:
         mono_img = Image.new("L", (size, size), 0)
         d_m = ImageDraw.Draw(mono_img)
-        initial = (author_name.strip()[:1] or "К").upper()
+        initial = (author_name.strip()[:1] or fallback_initial or "М").upper()
         f_size = int(basin_r * 1.15)
         font = ImageFont.truetype(font_cormorant_path, f_size)
         d_m.text((int(center), int(center) - 4), initial, font=font, fill=255, anchor="mm")
