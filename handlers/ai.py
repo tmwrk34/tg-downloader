@@ -330,7 +330,87 @@ async def memory_command_handler(message: Message, command: CommandObject | None
         )
         return
 
+    if subcmd in {"dedup", "дедуп"} or (
+        subcmd in {"dossier", "dossiers", "досьє"} and rest.lower() == "dedup"
+    ):
+        cleaned = await bot.munito_service.deduplicate_user_dossiers(chat_id)
+        dossiers = await bot.munito_service.get_user_dossiers(chat_id, limit=10)
+        lines = [
+            f"🧹 <b>Dossier Deduplication Complete!</b> (Cleaned/merged {cleaned} items)\n",
+            "🎭 <b>Cleaned Member Dossiers:</b>",
+        ]
+        if dossiers:
+            for d in dossiers:
+                uname = f" (@{html.escape(d.username)})" if d.username else ""
+                traits = "; ".join(html.escape(t) for t in d.traits)
+                lines.append(f"• <b>{html.escape(d.display_name)}</b>{uname}: {traits}")
+        else:
+            lines.append("<i>No member dossiers recorded yet.</i>")
+        await safe_reply(message, "\n".join(lines), parse_mode="HTML")
+        return
+
+    if subcmd in {"forget", "delete", "remove", "видалити", "забудь"}:
+        if not rest:
+            await safe_reply(
+                message,
+                "🗑 Usage: <code>/memory forget &lt;query or trait&gt;</code>",
+                parse_mode="HTML",
+            )
+            return
+        removed_memories = await bot.munito_service.forget_memory(chat_id, rest)
+        removed_dossier_traits = await bot.munito_service.forget_dossier_traits(chat_id, rest)
+        total = len(removed_memories) + len(removed_dossier_traits)
+        if total == 0:
+            await safe_reply(
+                message,
+                f"ℹ️ Nothing found to forget matching <code>{html.escape(rest)}</code> in lore or dossiers.",
+                parse_mode="HTML",
+            )
+            return
+        lines = [f"🗑 <b>Forgotten {total} items matching</b> <code>{html.escape(rest)}</code>:"]
+        for m in removed_memories:
+            lines.append(f"• [Lore/Episode] {html.escape(m.content)}")
+        for dt in removed_dossier_traits:
+            lines.append(f"• [Dossier: {html.escape(dt['user_name'])}] {html.escape(dt['trait'])}")
+        await safe_reply(message, "\n".join(lines), parse_mode="HTML")
+        return
+
     if subcmd in {"dossier", "dossiers", "досьє"}:
+        d_parts = rest.split(maxsplit=2)
+        if d_parts and d_parts[0].lower() in {"delete", "remove", "del", "видалити"}:
+            target_user = d_parts[1] if len(d_parts) > 1 else ""
+            trait_query = d_parts[2] if len(d_parts) > 2 else None
+            if not target_user:
+                await safe_reply(
+                    message,
+                    "Usage: <code>/memory dossier delete &lt;user&gt; [trait keyword]</code>",
+                    parse_mode="HTML",
+                )
+                return
+            success, count, _ = await bot.munito_service.delete_user_dossier(
+                chat_id, target_user, trait_query
+            )
+            if not success:
+                await safe_reply(
+                    message,
+                    f"⚠️ No dossier found for <code>{html.escape(target_user)}</code>.",
+                    parse_mode="HTML",
+                )
+                return
+            if trait_query:
+                await safe_reply(
+                    message,
+                    f"🗑 Removed {count} trait(s) matching <code>{html.escape(trait_query)}</code> from <b>{html.escape(target_user)}</b>'s dossier.",
+                    parse_mode="HTML",
+                )
+            else:
+                await safe_reply(
+                    message,
+                    f"🗑 Completely deleted dossier for <b>{html.escape(target_user)}</b>.",
+                    parse_mode="HTML",
+                )
+            return
+
         dossiers = await bot.munito_service.get_user_dossiers(
             chat_id=chat_id,
             active_user_id=user_id,
@@ -502,7 +582,7 @@ async def prompt_command_handler(message: Message, command: CommandObject) -> No
         else "Factory Default (prompts/system_prompt.txt)"
     )
 
-    if len(current_prompt) <= 3500:
+    if len(current_prompt) <= 3800:
         escaped_prompt = html.escape(current_prompt)
         text = (
             f"📜 <b>Active System Prompt</b> [<code>{source_label}</code>]\n"
@@ -519,7 +599,7 @@ async def prompt_command_handler(message: Message, command: CommandObject) -> No
         caption = (
             f"📜 <b>Active System Prompt</b> [<code>{source_label}</code>]\n\n"
             f"📊 <b>Length:</b> {len(current_prompt)} chars ({len(current_prompt.splitlines())} lines)\n"
-            "<i>(Prompt exceeds 3,500 characters and was sent as a text document)</i>"
+            "<i>(Prompt exceeds 3,800 characters and was sent as a text document)</i>"
         )
         await message.reply_document(doc, caption=caption, parse_mode="HTML")
 

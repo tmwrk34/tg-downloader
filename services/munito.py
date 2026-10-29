@@ -471,6 +471,7 @@ class MunitoAIService(SQLiteWALService):
         trait_or_note: str,
         user_id: int | None = None,
         username: str | None = None,
+        action: str = "add",
     ) -> UserDossier:
         return await asyncio.to_thread(
             self.memory_manager.update_user_dossier,
@@ -479,6 +480,8 @@ class MunitoAIService(SQLiteWALService):
             trait_or_note,
             user_id,
             username,
+            15,
+            action,
         )
 
     async def get_user_dossiers(
@@ -497,6 +500,42 @@ class MunitoAIService(SQLiteWALService):
             query_text,
             limit,
         )
+
+    async def delete_user_dossier(
+        self,
+        chat_id: int,
+        user_name: str,
+        trait_query: str | None = None,
+    ) -> tuple[bool, int, list[str]]:
+        return await asyncio.to_thread(
+            self.memory_manager.delete_user_dossier,
+            chat_id,
+            user_name,
+            trait_query,
+        )
+
+    async def merge_user_dossiers(
+        self,
+        chat_id: int,
+        source_name: str,
+        target_name: str,
+    ) -> UserDossier:
+        return await asyncio.to_thread(
+            self.memory_manager.merge_user_dossiers,
+            chat_id,
+            source_name,
+            target_name,
+        )
+
+    async def deduplicate_user_dossiers(self, chat_id: int) -> int:
+        return await asyncio.to_thread(self.memory_manager.deduplicate_user_dossiers, chat_id)
+
+    async def forget_dossier_traits(
+        self,
+        chat_id: int,
+        query: str,
+    ) -> list[dict[str, str]]:
+        return await asyncio.to_thread(self.memory_manager.forget_dossier_traits, chat_id, query)
 
     async def get_chat_lore(self, chat_id: int, limit: int = 8) -> list[MemoryEntry]:
         return await asyncio.to_thread(self.memory_manager.get_chat_lore, chat_id, limit)
@@ -688,9 +727,58 @@ class MunitoAIService(SQLiteWALService):
             elif func_name == "update_user_dossier":
                 target_user = str(args.get("user_name") or user_name or "Traveler").strip()
                 trait = str(args.get("trait_or_note") or "").strip()
-                if not trait:
-                    tool_output = {"error": "Missing 'trait_or_note' to record."}
-                else:
+                action = str(args.get("action") or "add").lower()
+                matched_uid = (
+                    user_id
+                    if user_name and target_user.lower() == user_name.strip().lower()
+                    else None
+                )
+                dossier = self.memory_manager.update_user_dossier(
+                    chat_id=target_chat_id,
+                    user_name=target_user,
+                    trait_or_note=trait,
+                    user_id=matched_uid,
+                    action=action,
+                )
+                tool_output = {
+                    "status": "updated" if action == "add" else action,
+                    "user_name": dossier.display_name,
+                    "traits": dossier.traits,
+                }
+
+            elif func_name == "manage_user_dossier":
+                target_user = str(args.get("user_name") or user_name or "Traveler").strip()
+                action = str(args.get("action") or "add").lower()
+                trait = str(args.get("trait_or_note") or "").strip()
+                merge_target = str(args.get("merge_target") or "").strip()
+
+                if action == "merge":
+                    if not merge_target:
+                        tool_output = {"error": "Missing 'merge_target' for merge action."}
+                    else:
+                        dossier = self.memory_manager.merge_user_dossiers(
+                            chat_id=target_chat_id,
+                            source_name=target_user,
+                            target_name=merge_target,
+                        )
+                        tool_output = {
+                            "status": "merged",
+                            "user_name": dossier.display_name,
+                            "traits": dossier.traits,
+                        }
+                elif action == "delete":
+                    success, del_count, rem_traits = self.memory_manager.delete_user_dossier(
+                        chat_id=target_chat_id,
+                        user_name=target_user,
+                        trait_query=trait or None,
+                    )
+                    tool_output = {
+                        "status": "deleted" if success else "not_found",
+                        "user_name": target_user,
+                        "deleted_count": del_count,
+                        "remaining_traits": rem_traits,
+                    }
+                elif action in ("add", "replace"):
                     matched_uid = (
                         user_id
                         if user_name and target_user.lower() == user_name.strip().lower()
@@ -701,23 +789,33 @@ class MunitoAIService(SQLiteWALService):
                         user_name=target_user,
                         trait_or_note=trait,
                         user_id=matched_uid,
+                        action=action,
                     )
                     tool_output = {
-                        "status": "updated",
+                        "status": "replaced" if action == "replace" else "updated",
                         "user_name": dossier.display_name,
                         "traits": dossier.traits,
                     }
+                else:
+                    tool_output = {"error": f"Unknown action: {action}"}
 
             elif func_name == "forget_fact":
                 query = str(args.get("query") or "").strip()
                 if not query:
                     tool_output = {"error": "Missing 'query' to forget."}
                 else:
-                    removed = self.memory_manager.forget_memory(chat_id=target_chat_id, query=query)
+                    removed_memories = self.memory_manager.forget_memory(
+                        chat_id=target_chat_id, query=query
+                    )
+                    removed_dossier_traits = self.memory_manager.forget_dossier_traits(
+                        chat_id=target_chat_id, query=query
+                    )
+                    total_removed = len(removed_memories) + len(removed_dossier_traits)
                     tool_output = {
-                        "status": "deleted" if removed else "not_found",
-                        "deleted_count": len(removed),
-                        "deleted_items": [r.content for r in removed],
+                        "status": "deleted" if total_removed > 0 else "not_found",
+                        "deleted_count": total_removed,
+                        "deleted_memories": [r.content for r in removed_memories],
+                        "deleted_dossier_traits": removed_dossier_traits,
                     }
 
             elif func_name == "search_tavern_archives":

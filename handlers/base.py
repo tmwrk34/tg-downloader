@@ -51,7 +51,7 @@ HELP_MANUAL_HTML = (
     "🤖 <b>Munito AI Assistant &amp; Tavern Archives:</b>\n"
     "• Tag <code>@bard_taverna_bot &lt;question&gt;</code> or reply directly to a bot message to invoke AI.\n"
     "• <code>/ai</code> — Interactive assistant card (status, model switch, reasoning effort, token stats).\n"
-    "• <code>/memory</code> (aliases: <code>/lore</code>, <code>/досьє</code>) — Inspect hybrid long-term tavern archives, search memories (<code>/memory search &lt;query&gt;</code>), or view member dossiers.\n"
+    "• <code>/memory</code> (aliases: <code>/lore</code>, <code>/досьє</code>) — Inspect hybrid long-term tavern archives, search memories (<code>/memory search &lt;query&gt;</code>), view/clean dossiers (<code>/memory dossier</code>, <code>/memory dedup</code>, <code>/memory forget &lt;query&gt;</code>).\n"
     "• <code>/prompt</code> (aliases: <code>/sysprompt</code>, <code>/системник</code>) — View active system prompt. Admins can update it (<code>/prompt set &lt;text&gt;</code>) or reset (<code>/prompt reset</code>).\n\n"
     "📜 <b>Tavern Quote Scrolls & Letters:</b>\n"
     "• <code>/q</code> or <code>/quote</code> (alias: <code>/цитата</code>) — Reply to any message to forge an authentic medieval scroll.\n"
