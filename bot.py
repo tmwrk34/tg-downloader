@@ -87,6 +87,7 @@ from handlers.ai import (  # noqa: E402
     ai_command_handler,
     chatter_message_listener,
     memory_command_handler,
+    prompt_command_handler,
 )
 from handlers.base import (  # noqa: E402
     HELP_MANUAL_HTML,
@@ -201,6 +202,7 @@ __all__ = [
     "natural_dice_handler",
     "ping_handler",
     "platform_registry",
+    "prompt_command_handler",
     "roll_command_handler",
     "secret_roll_callback_handler",
     "send_cached_media",

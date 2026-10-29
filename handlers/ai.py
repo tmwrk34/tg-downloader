@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import html
 import logging
 import re
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from filters.admin import is_chat_admin
 from services.munito import (
@@ -23,7 +24,11 @@ from services.munito import (
 from services.worker import set_message_reaction
 from utils.proxy import bot_proxy as bot
 from utils.responses import safe_reply
-from utils.telegram_media import download_telegram_photo, select_optimal_photo
+from utils.telegram_media import (
+    download_telegram_file_id,
+    download_telegram_photo,
+    select_optimal_photo,
+)
 from utils.typing import keep_typing
 
 logger = logging.getLogger(__name__)
@@ -371,6 +376,154 @@ async def memory_command_handler(message: Message, command: CommandObject | None
     await safe_reply(message, card_html, parse_mode="HTML")
 
 
+@ai_router.message(Command("prompt", "sysprompt", "системник"))
+async def prompt_command_handler(message: Message, command: CommandObject) -> None:
+    """View, download, update, or reset the AI assistant's system prompt."""
+    chat_id = message.chat.id
+    user_id = message.from_user.id if message.from_user else 0
+    raw_args = (command.args or "").strip()
+    parts = raw_args.split(maxsplit=1)
+    subcommand = parts[0].lower() if parts else ""
+    extra_text = parts[1].strip() if len(parts) > 1 else ""
+
+    # 1. Download as file: /prompt file or /prompt -f or /prompt doc
+    if subcommand in ("file", "-f", "--file", "doc", "document"):
+        current_prompt = bot.munito_service.get_system_prompt()
+        is_custom = bot.munito_service.is_custom_prompt()
+        source_label = (
+            "Custom (data/system_prompt.txt)"
+            if is_custom
+            else "Factory Default (prompts/system_prompt.txt)"
+        )
+        doc = BufferedInputFile(
+            current_prompt.encode("utf-8"),
+            filename="system_prompt.txt",
+        )
+        caption = (
+            f"📜 <b>Active System Prompt</b>\n"
+            f"• <b>Status:</b> <code>{source_label}</code>\n"
+            f"• <b>Length:</b> {len(current_prompt)} chars ({len(current_prompt.splitlines())} lines)"
+        )
+        await message.reply_document(doc, caption=caption, parse_mode="HTML")
+        return
+
+    # 2. Set/update prompt: /prompt set <text> (Admin only)
+    if subcommand in ("set", "update", "save"):
+        if not await is_chat_admin(message.bot, chat_id, user_id):
+            await safe_reply(
+                message,
+                "⛔ <b>Access Denied:</b> Only chat administrators can modify the system prompt.",
+                parse_mode="HTML",
+            )
+            return
+
+        new_prompt = extra_text
+        # If no inline text, check replied message
+        if not new_prompt and message.reply_to_message:
+            replied = message.reply_to_message
+            if replied.document and message.bot:
+                doc_bytes = await download_telegram_file_id(message.bot, replied.document.file_id)
+                if doc_bytes:
+                    new_prompt = doc_bytes.decode("utf-8", errors="replace").strip()
+            elif replied.text:
+                new_prompt = replied.text.strip()
+            elif replied.caption:
+                new_prompt = replied.caption.strip()
+
+        if not new_prompt:
+            await safe_reply(
+                message,
+                "ℹ️ <b>System Prompt Usage:</b>\n\n"
+                "• <code>/prompt set &lt;new prompt text&gt;</code>\n"
+                "• Reply to a text message with <code>/prompt set</code>\n"
+                "• Reply to a <code>.txt</code> file with <code>/prompt set</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        saved_path = bot.munito_service.set_system_prompt(new_prompt)
+        await safe_reply(
+            message,
+            "✅ <b>System Prompt Updated &amp; Persisted!</b>\n\n"
+            f"📁 <b>Saved to:</b> <code>{saved_path}</code>\n"
+            f"📊 <b>Length:</b> {len(new_prompt)} chars ({len(new_prompt.splitlines())} lines)\n"
+            "🔄 <b>Persistence:</b> Changes are saved to persistent storage and will survive container redeployments and restarts.",
+            parse_mode="HTML",
+        )
+        return
+
+    # 3. Reset prompt: /prompt reset (Admin only)
+    if subcommand in ("reset", "revert", "factory"):
+        if not await is_chat_admin(message.bot, chat_id, user_id):
+            await safe_reply(
+                message,
+                "⛔ <b>Access Denied:</b> Only chat administrators can reset the system prompt.",
+                parse_mode="HTML",
+            )
+            return
+
+        reloaded = bot.munito_service.reset_system_prompt()
+        await safe_reply(
+            message,
+            "🔄 <b>System Prompt Reset to Factory Default!</b>\n\n"
+            "📁 <b>Template:</b> <code>prompts/system_prompt.txt</code>\n"
+            f"📊 <b>Length:</b> {len(reloaded)} chars ({len(reloaded.splitlines())} lines)",
+            parse_mode="HTML",
+        )
+        return
+
+    # 4. Help: /prompt help or /prompt ?
+    if subcommand in ("help", "?", "довідка", "хелп"):
+        is_custom = bot.munito_service.is_custom_prompt()
+        source_label = (
+            "Custom (data/system_prompt.txt)"
+            if is_custom
+            else "Factory Default (prompts/system_prompt.txt)"
+        )
+        help_text = (
+            "📜 <b>System Prompt Management</b>\n\n"
+            f"• <b>Current Source:</b> <code>{source_label}</code>\n\n"
+            "<b>Commands:</b>\n"
+            "• <code>/prompt</code> or <code>/prompt get</code> — View current active prompt\n"
+            "• <code>/prompt file</code> — Download prompt as <code>.txt</code> document\n"
+            "• <code>/prompt set &lt;text&gt;</code> — 👑 Update prompt (saved to persistent storage)\n"
+            "• Reply to a message or <code>.txt</code> file with <code>/prompt set</code> — 👑 Set prompt from reply\n"
+            "• <code>/prompt reset</code> — 👑 Revert to factory default prompt"
+        )
+        await safe_reply(message, help_text, parse_mode="HTML")
+        return
+
+    # 5. Default action: view active system prompt (/prompt or /prompt get)
+    current_prompt = bot.munito_service.get_system_prompt()
+    is_custom = bot.munito_service.is_custom_prompt()
+    source_label = (
+        "Custom (data/system_prompt.txt)"
+        if is_custom
+        else "Factory Default (prompts/system_prompt.txt)"
+    )
+
+    if len(current_prompt) <= 3500:
+        escaped_prompt = html.escape(current_prompt)
+        text = (
+            f"📜 <b>Active System Prompt</b> [<code>{source_label}</code>]\n"
+            f"📊 {len(current_prompt)} chars | {len(current_prompt.splitlines())} lines\n\n"
+            f'<pre><code class="language-markdown">{escaped_prompt}</code></pre>\n\n'
+            "<i>Tip: Use <code>/prompt file</code> to download as a .txt file, or <code>/prompt set &lt;text&gt;</code> (Admin) to update.</i>"
+        )
+        await safe_reply(message, text, parse_mode="HTML")
+    else:
+        doc = BufferedInputFile(
+            current_prompt.encode("utf-8"),
+            filename="system_prompt.txt",
+        )
+        caption = (
+            f"📜 <b>Active System Prompt</b> [<code>{source_label}</code>]\n\n"
+            f"📊 <b>Length:</b> {len(current_prompt)} chars ({len(current_prompt.splitlines())} lines)\n"
+            "<i>(Prompt exceeds 3,500 characters and was sent as a text document)</i>"
+        )
+        await message.reply_document(doc, caption=caption, parse_mode="HTML")
+
+
 @ai_router.callback_query(F.data.startswith("ai:"))
 async def ai_callback_handler(callback: CallbackQuery) -> None:
     if not callback.data:
@@ -548,3 +701,12 @@ async def chatter_message_listener(message: Message, active_bot: Bot | None = No
                 "(My vocabulary in this tavern is still empty! Talk more so I can learn to speak.)",
                 parse_mode="HTML",
             )
+
+
+__all__ = [
+    "ai_callback_handler",
+    "ai_command_handler",
+    "ai_router",
+    "memory_command_handler",
+    "prompt_command_handler",
+]
