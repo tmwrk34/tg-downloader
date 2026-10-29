@@ -72,7 +72,7 @@ AI_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "update_user_dossier",
             "description": (
-                "Add or update a personal trait, hobby, preference, nickname, or role in the Tavern Dossier for a specific chat member."
+                "Add, replace, or update a personal trait, hobby, preference, nickname, or role in the Tavern Dossier for a specific chat member."
             ),
             "parameters": {
                 "type": "object",
@@ -85,6 +85,11 @@ AI_TOOLS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": "Concise trait or fact about this user (e.g. 'Грає за паладина в D&D', 'Пише на Python та Rust').",
                     },
+                    "action": {
+                        "type": "string",
+                        "enum": ["add", "replace", "delete"],
+                        "description": "Optional action: 'add' (default), 'replace' (overwrites all traits with this note), or 'delete' (removes matching trait).",
+                    },
                 },
                 "required": ["user_name", "trait_or_note"],
             },
@@ -93,9 +98,46 @@ AI_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "manage_user_dossier",
+            "description": (
+                "Comprehensive management of member dossiers in the Tavern Ledger: add a trait, "
+                "replace all traits with a clean summary, delete specific traits or whole dossiers, "
+                "or merge duplicate profiles (e.g. merging 'Bard' and '@bard_taverna_bot')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_name": {
+                        "type": "string",
+                        "description": "Display name or @username of the chat member (e.g. 'Illya', 'Бард').",
+                    },
+                    "action": {
+                        "type": "string",
+                        "enum": ["add", "replace", "delete", "merge"],
+                        "description": (
+                            "Action: 'add' to append/update a trait; 'replace' to overwrite all existing traits with a clean summary; "
+                            "'delete' to remove a specific trait or whole user dossier; 'merge' to merge this user's profile into merge_target."
+                        ),
+                    },
+                    "trait_or_note": {
+                        "type": "string",
+                        "description": "The trait text to add, the replacement summary to set (for 'replace'), or the keyword/trait to remove (for 'delete').",
+                    },
+                    "merge_target": {
+                        "type": "string",
+                        "description": "Destination user name when action='merge' (e.g. 'Бард').",
+                    },
+                },
+                "required": ["user_name", "action"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "forget_fact",
             "description": (
-                "Remove a specific outdated or unwanted fact/memory from the chat's long-term tavern archives."
+                "Remove a specific outdated or unwanted fact, memory, or member dossier trait from the chat's long-term tavern archives."
             ),
             "parameters": {
                 "type": "object",
@@ -309,6 +351,8 @@ def format_memory_card(
             "• <code>/memory search &lt;query&gt;</code> — Hybrid vector + BM25 search",
             "• <code>/memory remember &lt;fact&gt;</code> — Add lore to the tavern ledger",
             "• <code>/memory dossier</code> — View member dossiers",
+            "• <code>/memory dedup</code> — Clean duplicates &amp; merge profiles",
+            "• <code>/memory forget &lt;query&gt;</code> — Remove fact or dossier trait",
             "• <code>/memory clear</code> — Wipe long-term archives (Admin)",
         ]
     )

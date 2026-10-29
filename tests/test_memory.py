@@ -505,3 +505,159 @@ async def test_memory_command_handler(tmp_path: Path):
         assert stats.dossier_count == 0
 
     svc.close()
+
+
+@pytest.mark.asyncio
+async def test_dossier_deduplication_and_alias_merging(tmp_path: Path):
+    """Verify automatic merging of bot aliases and redundant member traits."""
+    db_file = tmp_path / "test_dedup.db"
+    svc = MunitoAIService(api_key="test_key", db_path=db_file)
+    chat_id = -1002366722481
+
+    # 1. Simulate duplicate bot entries (e.g. from user prompt variations)
+    await svc.update_user_dossier(chat_id, "Бард", "Официально признанный бармен и бард.")
+    await svc.update_user_dossier(
+        chat_id,
+        "Bard (@bard_taverna_bot)",
+        "Официально признанный бард и бармен таверны.",
+    )
+
+    # 2. Simulate duplicate human user traits
+    await svc.update_user_dossier(
+        chat_id,
+        "Illya",
+        "Разработчик таверн-бота: прикрутил память, новые фичи цитат.",
+    )
+    await svc.update_user_dossier(
+        chat_id,
+        "Illya",
+        "Называет Барда балбесом и как Житомир.",
+    )
+    # Add an update trait that supersedes the first
+    await svc.update_user_dossier(
+        chat_id,
+        "Illya",
+        "Разработчик таверн-бота: прикрутил память, новые фичи цитат (q/f/s). Из досье балбес убрано.",
+    )
+
+    # Before dedup, get_user_dossiers automatically runs deduplication
+    dossiers = await svc.get_user_dossiers(chat_id, limit=10)
+
+    # Bot dossiers must be merged into 1 canonical dossier
+    bot_dossiers = [d for d in dossiers if d.user_id == -999999 or "Бард" in d.display_name]
+    assert len(bot_dossiers) == 1
+    assert bot_dossiers[0].display_name == "Бард"
+    assert bot_dossiers[0].username == "bard_taverna_bot"
+    assert len(bot_dossiers[0].traits) == 1  # Near-duplicate traits merged into 1
+
+    # Illya dossier should have near-duplicate developer traits merged
+    illya_dossiers = [d for d in dossiers if d.display_name == "Illya"]
+    assert len(illya_dossiers) == 1
+    assert len(illya_dossiers[0].traits) <= 2
+    # Verify the more complete trait was preserved
+    combined_traits = " ".join(illya_dossiers[0].traits)
+    assert "Из досье балбес убрано" in combined_traits
+
+    svc.close()
+
+
+@pytest.mark.asyncio
+async def test_manage_user_dossier_actions_and_forget(tmp_path: Path):
+    """Test replace, delete, merge actions and forget_dossier_traits."""
+    db_file = tmp_path / "test_actions.db"
+    svc = MunitoAIService(api_key="test_key", db_path=db_file)
+    chat_id = -100555
+
+    # 1. Add traits and replace with clean summary
+    await svc.update_user_dossier(chat_id, "Farid", "Любит шашлык.")
+    await svc.update_user_dossier(chat_id, "Farid", "В таверне его называют мясником.")
+    d = await svc.get_user_dossiers(chat_id)
+    assert len(d[0].traits) == 2
+
+    # Replace action
+    await svc.update_user_dossier(
+        chat_id,
+        "Farid",
+        "Шеф-повар таверны: готовит лучший шашлык в округе.",
+        action="replace",
+    )
+    d = await svc.get_user_dossiers(chat_id)
+    assert len(d[0].traits) == 1
+    assert "Шеф-повар таверны" in d[0].traits[0]
+
+    # 2. Delete specific trait
+    await svc.update_user_dossier(chat_id, "Emel'en", "Любит пиво.")
+    await svc.update_user_dossier(chat_id, "Emel'en", "Спит на лавке.")
+    success, del_count, rem = await svc.delete_user_dossier(chat_id, "Emel'en", trait_query="лавка")
+    assert success is True
+    assert del_count == 1
+    assert len(rem) == 1
+    assert rem[0] == "Любит пиво."
+
+    # 3. forget_dossier_traits across chat
+    await svc.update_user_dossier(chat_id, "Vova", "Постоянно кричит 'балбес'.")
+    deleted_traits = await svc.forget_dossier_traits(chat_id, "балбес")
+    assert len(deleted_traits) >= 1
+    assert any("Vova" in dt["user_name"] for dt in deleted_traits)
+
+    # 4. Merge action
+    await svc.update_user_dossier(chat_id, "OldNick", "Старый следопыт.")
+    merged_dossier = await svc.merge_user_dossiers(chat_id, "OldNick", "NewNick")
+    assert merged_dossier.display_name == "NewNick"
+    assert any("Старый следопыт" in t for t in merged_dossier.traits)
+
+    # Verify OldNick is gone
+    d_list = await svc.get_user_dossiers(chat_id)
+    assert not any(d.display_name == "OldNick" for d in d_list)
+
+    svc.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_command_dedup_and_forget(tmp_path: Path):
+    """Test /memory dedup and /memory forget commands in Telegram."""
+    db_file = tmp_path / "test_cmd_dedup.db"
+    svc = MunitoAIService(api_key="test_key", db_path=db_file)
+    chat_id = -100777
+    user_id = 999
+
+    fake_bot = AsyncMock()
+    fake_bot.get_chat_member.return_value = MagicMock(status="administrator")
+    chat = Chat(id=chat_id, type="supergroup", title="Test Tavern")
+    user = User(id=user_id, is_bot=False, first_name="Illya")
+    msg = Message(
+        message_id=50,
+        date=datetime.datetime.now(datetime.UTC),
+        chat=chat,
+        from_user=user,
+        text="/memory",
+    ).as_(fake_bot)
+
+    # Populate duplicate dossiers and lore
+    await svc.remember_fact(chat_id, "В таверне запрещено разбивать кружки.", category="rule")
+    await svc.update_user_dossier(chat_id, "Бард", "Официально признанный бард.")
+    await svc.update_user_dossier(chat_id, "Bard (@bard_taverna_bot)", "Бард и бармен таверны.")
+
+    with (
+        patch("handlers.ai.bot.munito_service", svc),
+        patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply,
+    ):
+        # 1. /memory dedup
+        await memory_command_handler(msg, CommandObject(prefix="/", command="memory", args="dedup"))
+        assert "Dossier Deduplication Complete" in mock_reply.call_args[0][0]
+
+        # 2. /memory forget кружки (removes from lore)
+        mock_reply.reset_mock()
+        await memory_command_handler(
+            msg, CommandObject(prefix="/", command="memory", args="forget кружки")
+        )
+        assert "Forgotten" in mock_reply.call_args[0][0]
+
+        # 3. /memory dossier delete Бард
+        mock_reply.reset_mock()
+        await memory_command_handler(
+            msg, CommandObject(prefix="/", command="memory", args="dossier delete Бард")
+        )
+        assert "Completely deleted dossier" in mock_reply.call_args[0][0]
+
+    svc.close()

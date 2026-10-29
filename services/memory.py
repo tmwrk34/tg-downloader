@@ -306,6 +306,35 @@ def cosine_similarity(v1: np.ndarray, v2: np.ndarray) -> float:
     return float(np.dot(v1, v2))
 
 
+BOT_NAME_VARIANTS = {
+    "бард",
+    "bard",
+    "bard-bot",
+    "bard_bot",
+    "bard_taverna_bot",
+    "@bard_taverna_bot",
+    "бард-бот",
+    "муніто",
+    "бармен",
+    "bard (@bard_taverna_bot)",
+    "бард (@bard_taverna_bot)",
+}
+
+
+def is_bot_identity(name: str) -> bool:
+    """Check if the given display name or username refers to Bard himself."""
+    clean = (name or "").strip().lower().lstrip("@")
+    if not clean:
+        return False
+    if clean in BOT_NAME_VARIANTS:
+        return True
+    if "bard" in clean and "taverna" in clean:
+        return True
+    if clean.startswith("бард") or clean.startswith("bard"):
+        return True
+    return False
+
+
 class HybridMemoryManager:
     """
     Manages long-term episodic memories, tavern lore, and user dossiers
@@ -809,6 +838,186 @@ class HybridMemoryManager:
                 for r in cursor.fetchall()
             ]
 
+    def _trait_matches_query(self, query: str, trait: str) -> bool:
+        """Check if a trait matches a query string via substring, Slavic stems, or semantic vector."""
+        q_low = query.strip().lower()
+        t_low = trait.strip().lower()
+        if not q_low or not t_low:
+            return False
+        if q_low in t_low or t_low in q_low:
+            return True
+        q_words = re.findall(r"[\w]+", q_low)
+        t_words = re.findall(r"[\w]+", t_low)
+        q_stems = {w[:4] for w in q_words if len(w) >= 3}
+        t_stems = {w[:4] for w in t_words if len(w) >= 3}
+        if q_stems and (q_stems & t_stems):
+            return True
+        q_vec = self._embedder.embed(q_low)
+        t_vec = self._embedder.embed(t_low)
+        return cosine_similarity(q_vec, t_vec) >= 0.55
+
+    def _dedup_traits_list(self, traits: list[str]) -> list[str]:
+        """Deduplicate traits semantically and remove obsolete or redundant entries."""
+        if not traits:
+            return []
+        unique_traits: list[str] = []
+        for t in reversed(traits):
+            clean_t = t.strip()
+            if not clean_t:
+                continue
+            is_dup = False
+            t_vec = self._embedder.embed(clean_t)
+            for idx, existing in enumerate(unique_traits):
+                # 1. Exact or substring check
+                if clean_t.lower() == existing.lower() or clean_t.lower() in existing.lower():
+                    is_dup = True
+                    break
+                if existing.lower() in clean_t.lower():
+                    unique_traits[idx] = clean_t
+                    is_dup = True
+                    break
+                # 2. Semantic vector similarity check (threshold 0.78)
+                e_vec = self._embedder.embed(existing)
+                if cosine_similarity(t_vec, e_vec) >= 0.78:
+                    if len(clean_t) > len(existing):
+                        unique_traits[idx] = clean_t
+                    is_dup = True
+                    break
+            if not is_dup:
+                unique_traits.append(clean_t)
+
+        unique_traits.reverse()
+        return unique_traits
+
+    def deduplicate_user_dossiers(self, chat_id: int) -> int:
+        """
+        Deduplicate member dossiers in chat_id:
+        - Merges multiple bot dossiers into a single canonical 'Бард' (username: 'bard_taverna_bot', user_id: -999999).
+        - Merges multiple dossiers of the same user (e.g. 'Illya' and 'Illya (@username)').
+        - Removes duplicate, redundant, or conflicting traits within each dossier.
+        Returns total number of cleaned/merged entries.
+        """
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT user_id, username, display_name, traits_json
+                FROM ai_user_dossiers
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                return 0
+
+            cleaned_count = 0
+            bot_rows: list[tuple[int, str | None, str, list[str]]] = []
+            user_rows_by_key: dict[str, list[tuple[int, str | None, str, list[str]]]] = {}
+
+            for row in rows:
+                uid, uname, dname, traits_raw = row[0], row[1], row[2], row[3]
+                try:
+                    traits = json.loads(traits_raw)
+                except Exception:
+                    traits = []
+
+                if is_bot_identity(dname) or is_bot_identity(uname or "") or uid == -999999:
+                    bot_rows.append((uid, uname, dname, traits))
+                else:
+                    norm_key = (uname or dname or "").strip().lower().lstrip("@")
+                    if norm_key not in user_rows_by_key:
+                        user_rows_by_key[norm_key] = []
+                    user_rows_by_key[norm_key].append((uid, uname, dname, traits))
+
+            # Merge bot rows if multiple exist or if non-canonical
+            if len(bot_rows) > 1 or (
+                bot_rows and (bot_rows[0][0] != -999999 or bot_rows[0][2] != "Бард")
+            ):
+                all_bot_traits: list[str] = []
+                for b_uid, _b_uname, _b_dname, b_traits in bot_rows:
+                    all_bot_traits.extend(b_traits)
+                    cursor.execute(
+                        "DELETE FROM ai_user_dossiers WHERE chat_id = ? AND user_id = ?",
+                        (chat_id, b_uid),
+                    )
+                    cleaned_count += 1
+                deduped_bot_traits = self._dedup_traits_list(all_bot_traits)
+                cursor.execute(
+                    """
+                    INSERT INTO ai_user_dossiers (chat_id, user_id, username, display_name, traits_json, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(chat_id, user_id) DO UPDATE SET
+                        username = excluded.username,
+                        display_name = excluded.display_name,
+                        traits_json = excluded.traits_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        chat_id,
+                        -999999,
+                        "bard_taverna_bot",
+                        "Бард",
+                        json.dumps(deduped_bot_traits, ensure_ascii=False),
+                        time.time(),
+                    ),
+                )
+            elif bot_rows:
+                b_uid, _b_uname, _b_dname, b_traits = bot_rows[0]
+                deduped = self._dedup_traits_list(b_traits)
+                if len(deduped) != len(b_traits):
+                    cursor.execute(
+                        "UPDATE ai_user_dossiers SET traits_json = ? WHERE chat_id = ? AND user_id = ?",
+                        (json.dumps(deduped, ensure_ascii=False), chat_id, b_uid),
+                    )
+                    cleaned_count += len(b_traits) - len(deduped)
+
+            # Merge human user rows with same key
+            for _norm_key, u_list in user_rows_by_key.items():
+                if len(u_list) > 1:
+                    primary_uid = u_list[0][0]
+                    primary_uname = u_list[0][1]
+                    primary_dname = u_list[0][2]
+                    all_traits: list[str] = []
+                    for uid, uname, _dname, traits in u_list:
+                        all_traits.extend(traits)
+                        if uid != primary_uid:
+                            cursor.execute(
+                                "DELETE FROM ai_user_dossiers WHERE chat_id = ? AND user_id = ?",
+                                (chat_id, uid),
+                            )
+                            cleaned_count += 1
+                        if uname and not primary_uname:
+                            primary_uname = uname
+                    deduped = self._dedup_traits_list(all_traits)
+                    cursor.execute(
+                        """
+                        UPDATE ai_user_dossiers
+                        SET username = ?, display_name = ?, traits_json = ?, updated_at = ?
+                        WHERE chat_id = ? AND user_id = ?
+                        """,
+                        (
+                            primary_uname,
+                            primary_dname,
+                            json.dumps(deduped, ensure_ascii=False),
+                            time.time(),
+                            chat_id,
+                            primary_uid,
+                        ),
+                    )
+                else:
+                    uid, _uname, _dname, traits = u_list[0]
+                    deduped = self._dedup_traits_list(traits)
+                    if len(deduped) != len(traits):
+                        cursor.execute(
+                            "UPDATE ai_user_dossiers SET traits_json = ? WHERE chat_id = ? AND user_id = ?",
+                            (json.dumps(deduped, ensure_ascii=False), chat_id, uid),
+                        )
+                        cleaned_count += len(traits) - len(deduped)
+
+            self._conn.commit()
+            return cleaned_count
+
     def update_user_dossier(
         self,
         chat_id: int,
@@ -817,14 +1026,20 @@ class HybridMemoryManager:
         user_id: int | None = None,
         username: str | None = None,
         max_traits: int = 15,
+        action: str = "add",
     ) -> UserDossier:
         """
-        Add or update a trait/note in a member's Tavern Dossier.
-        Deduplicates semantically similar traits for the same user.
+        Add, replace, delete, or merge a member's traits in their Tavern Dossier.
         """
         clean_name = (user_name or "Traveler").strip().lstrip("@")
         clean_note = trait_or_note.strip()
         now = time.time()
+        act = action.lower()
+
+        if is_bot_identity(clean_name):
+            clean_name = "Бард"
+            username = username or "bard_taverna_bot"
+            user_id = -999999
 
         with self._lock:
             cursor = self._conn.cursor()
@@ -848,15 +1063,20 @@ class HybridMemoryManager:
                     with ExceptionSuppressor():
                         existing_traits = json.loads(row[3])
             else:
-                # Try matching by display_name or username in ai_user_dossiers
                 cursor.execute(
                     """
                     SELECT user_id, username, display_name, traits_json
                     FROM ai_user_dossiers
-                    WHERE chat_id = ? AND (LOWER(display_name) = LOWER(?) OR LOWER(username) = LOWER(?))
+                    WHERE chat_id = ? AND (
+                        LOWER(display_name) = LOWER(?) OR
+                        LOWER(username) = LOWER(?) OR
+                        LOWER(display_name) LIKE LOWER(?) || ' %' OR
+                        LOWER(?) LIKE LOWER(display_name) || ' %'
+                    )
+                    ORDER BY CASE WHEN LOWER(display_name) = LOWER(?) THEN 0 ELSE 1 END
                     LIMIT 1
                     """,
-                    (chat_id, clean_name, clean_name),
+                    (chat_id, clean_name, clean_name, clean_name, clean_name, clean_name),
                 )
                 row = cursor.fetchone()
                 if row:
@@ -866,25 +1086,63 @@ class HybridMemoryManager:
                     with ExceptionSuppressor():
                         existing_traits = json.loads(row[3])
                 else:
-                    # Generate deterministic synthetic user_id from normalized name
                     digest = hashlib.blake2b(
                         clean_name.lower().encode("utf-8"), digest_size=6
                     ).digest()
                     resolved_uid = -abs(int.from_bytes(digest, "little"))
 
-            if clean_note:
-                new_vec = self._embedder.embed(clean_note)
-                merged = False
-                for idx, old_trait in enumerate(existing_traits):
-                    old_vec = self._embedder.embed(old_trait)
-                    if cosine_similarity(new_vec, old_vec) >= 0.88:
-                        existing_traits[idx] = clean_note
-                        merged = True
-                        break
-                if not merged:
-                    existing_traits.append(clean_note)
-                if len(existing_traits) > max_traits:
-                    existing_traits = existing_traits[-max_traits:]
+            if act == "replace":
+                if clean_note:
+                    parts = [p.strip() for p in clean_note.split(";") if p.strip()]
+                    existing_traits = parts if parts else [clean_note]
+                else:
+                    existing_traits = []
+            elif act == "delete":
+                if clean_note:
+                    remaining = [
+                        t for t in existing_traits if not self._trait_matches_query(clean_note, t)
+                    ]
+                    existing_traits = remaining
+                else:
+                    existing_traits = []
+            else:
+                # Default "add"
+                if clean_note:
+                    new_vec = self._embedder.embed(clean_note)
+                    merged = False
+                    for idx, old_trait in enumerate(existing_traits):
+                        old_vec = self._embedder.embed(old_trait)
+                        if (
+                            clean_note.lower() in old_trait.lower()
+                            or old_trait.lower() in clean_note.lower()
+                            or cosine_similarity(new_vec, old_vec) >= 0.80
+                        ):
+                            existing_traits[idx] = (
+                                clean_note if len(clean_note) >= len(old_trait) else old_trait
+                            )
+                            merged = True
+                            break
+                    if not merged:
+                        existing_traits.append(clean_note)
+                    if len(existing_traits) > max_traits:
+                        existing_traits = existing_traits[-max_traits:]
+
+            existing_traits = self._dedup_traits_list(existing_traits)
+
+            if not existing_traits:
+                cursor.execute(
+                    "DELETE FROM ai_user_dossiers WHERE chat_id = ? AND user_id = ?",
+                    (chat_id, resolved_uid),
+                )
+                self._conn.commit()
+                return UserDossier(
+                    chat_id=chat_id,
+                    user_id=resolved_uid,
+                    username=resolved_username,
+                    display_name=clean_name,
+                    traits=[],
+                    updated_at=now,
+                )
 
             traits_str = json.dumps(existing_traits, ensure_ascii=False)
             self._conn.execute(
@@ -910,6 +1168,161 @@ class HybridMemoryManager:
                 updated_at=now,
             )
 
+    def delete_user_dossier(
+        self,
+        chat_id: int,
+        user_name: str,
+        trait_query: str | None = None,
+    ) -> tuple[bool, int, list[str]]:
+        """
+        Delete a member's entire dossier or specific traits matching `trait_query`.
+        Returns (success, deleted_traits_count, remaining_traits).
+        """
+        clean_name = (user_name or "").strip().lstrip("@")
+        if not clean_name:
+            return False, 0, []
+
+        if is_bot_identity(clean_name):
+            target_filter = "(user_id = -999999 OR LOWER(display_name) LIKE '%бард%' OR LOWER(display_name) LIKE '%bard%')"
+            args: tuple[Any, ...] = (chat_id,)
+        else:
+            target_filter = "(LOWER(display_name) = LOWER(?) OR LOWER(username) = LOWER(?))"
+            args = (chat_id, clean_name, clean_name)
+
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                f"SELECT user_id, display_name, traits_json FROM ai_user_dossiers WHERE chat_id = ? AND {target_filter}",
+                args,
+            )
+            rows = cursor.fetchall()
+            if not rows:
+                return False, 0, []
+
+            total_deleted = 0
+            remaining_traits_res: list[str] = []
+
+            for r in rows:
+                uid, _dname, traits_raw = r[0], r[1], r[2]
+                try:
+                    traits = json.loads(traits_raw)
+                except Exception:
+                    traits = []
+
+                if not trait_query:
+                    cursor.execute(
+                        "DELETE FROM ai_user_dossiers WHERE chat_id = ? AND user_id = ?",
+                        (chat_id, uid),
+                    )
+                    total_deleted += len(traits) or 1
+                else:
+                    kept = []
+                    for t in traits:
+                        if self._trait_matches_query(trait_query, t):
+                            total_deleted += 1
+                        else:
+                            kept.append(t)
+                    if kept:
+                        cursor.execute(
+                            "UPDATE ai_user_dossiers SET traits_json = ? WHERE chat_id = ? AND user_id = ?",
+                            (json.dumps(kept, ensure_ascii=False), chat_id, uid),
+                        )
+                        remaining_traits_res = kept
+                    else:
+                        cursor.execute(
+                            "DELETE FROM ai_user_dossiers WHERE chat_id = ? AND user_id = ?",
+                            (chat_id, uid),
+                        )
+
+            self._conn.commit()
+            return True, total_deleted, remaining_traits_res
+
+    def merge_user_dossiers(
+        self,
+        chat_id: int,
+        source_name: str,
+        target_name: str,
+    ) -> UserDossier:
+        """Merge source member profile into target member profile."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT user_id, display_name, traits_json
+                FROM ai_user_dossiers
+                WHERE chat_id = ? AND (LOWER(display_name) = LOWER(?) OR LOWER(username) = LOWER(?))
+                """,
+                (chat_id, source_name.strip().lstrip("@"), source_name.strip().lstrip("@")),
+            )
+            s_row = cursor.fetchone()
+            s_traits = []
+            if s_row:
+                try:
+                    s_traits = json.loads(s_row[2])
+                except Exception:
+                    s_traits = []
+                cursor.execute(
+                    "DELETE FROM ai_user_dossiers WHERE chat_id = ? AND user_id = ?",
+                    (chat_id, s_row[0]),
+                )
+                self._conn.commit()
+
+        target_dossier = self.update_user_dossier(chat_id, target_name, "")
+        for st in s_traits:
+            target_dossier = self.update_user_dossier(chat_id, target_name, st, action="add")
+
+        return target_dossier
+
+    def forget_dossier_traits(
+        self,
+        chat_id: int,
+        query: str,
+    ) -> list[dict[str, str]]:
+        """
+        Scan all dossiers in chat_id and remove traits matching `query`.
+        Returns list of deleted traits: [{'user_name': ..., 'trait': ...}].
+        """
+        clean_q = query.strip().lower()
+        if not clean_q:
+            return []
+        deleted: list[dict[str, str]] = []
+
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                "SELECT user_id, display_name, traits_json FROM ai_user_dossiers WHERE chat_id = ?",
+                (chat_id,),
+            )
+            rows = cursor.fetchall()
+            for r in rows:
+                uid, dname, traits_raw = r[0], r[1], r[2]
+                try:
+                    traits = json.loads(traits_raw)
+                except Exception:
+                    continue
+                remaining = []
+                modified = False
+                for t in traits:
+                    if self._trait_matches_query(clean_q, t):
+                        deleted.append({"user_name": dname, "trait": t})
+                        modified = True
+                    else:
+                        remaining.append(t)
+                if modified:
+                    if remaining:
+                        cursor.execute(
+                            "UPDATE ai_user_dossiers SET traits_json = ? WHERE chat_id = ? AND user_id = ?",
+                            (json.dumps(remaining, ensure_ascii=False), chat_id, uid),
+                        )
+                    else:
+                        cursor.execute(
+                            "DELETE FROM ai_user_dossiers WHERE chat_id = ? AND user_id = ?",
+                            (chat_id, uid),
+                        )
+            self._conn.commit()
+
+        return deleted
+
     def get_user_dossiers(
         self,
         chat_id: int,
@@ -920,8 +1333,9 @@ class HybridMemoryManager:
     ) -> list[UserDossier]:
         """
         Retrieve relevant user dossiers for a chat: prioritizes active speaker
-        and any users mentioned in `query_text`.
+        and any users mentioned in `query_text`. Automatically deduplicates on fetch.
         """
+        self.deduplicate_user_dossiers(chat_id)
         with self._lock:
             cursor = self._conn.cursor()
             cursor.execute(
