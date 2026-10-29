@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from aiogram.types import Chat, Message, User
+from aiogram.types import Chat, Message, PhotoSize, User
 
 from handlers.quote import _download_avatar_bytes, quote_command_handler
 from utils.telegram_media import download_telegram_file_id
@@ -167,3 +167,117 @@ async def test_download_telegram_file_id_local_bot_api_http_fallback(tmp_path: P
         assert data == b"http_local_api_photo_bytes"
         called_url = mock_session.get.call_args.args[0]
         assert called_url == "http://telegram-bot-api:8081/file/bot123456:ABCDEF/photos/file_42.jpg"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cmd_text", "expected_seal", "expected_dropcap"),
+    [
+        ("/qs Звичайна цитата", False, True),
+        ("/qf Звичайна цитата", True, False),
+        ("/qsf Звичайна цитата", False, False),
+        ("/qfs Звичайна цитата", False, False),
+        ("/q -s Звичайна цитата", False, True),
+        ("/q -f Звичайна цитата", True, False),
+        ("/q -sf Звичайна цитата", False, False),
+    ],
+)
+async def test_quote_command_modifiers(cmd_text: str, expected_seal: bool, expected_dropcap: bool):
+    bot = create_mock_bot()
+    msg = create_message(text=cmd_text)
+    fake_jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 1000
+
+    with patch(
+        "handlers.quote.quote_service.async_render_quote", new_callable=AsyncMock
+    ) as mock_render:
+        mock_render.return_value = fake_jpeg
+        await quote_command_handler(msg, bot)
+
+        mock_render.assert_awaited_once()
+        kwargs = mock_render.call_args.kwargs
+        assert kwargs["text"] == "Звичайна цитата"
+        assert kwargs["show_seal"] == expected_seal
+        assert kwargs["show_dropcap"] == expected_dropcap
+        bot.send_photo.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_quote_reply_to_photo_with_custom_text():
+    bot = create_mock_bot()
+    photo_sender = create_user(user_id=888, name="Painter")
+    replied_photo_msg = Message(
+        message_id=200,
+        date=datetime.now(UTC),
+        chat=Chat(id=-100123456789, type="supergroup"),
+        from_user=photo_sender,
+        photo=[
+            PhotoSize(file_id="photo_small", file_unique_id="uniq_1", width=100, height=100),
+            PhotoSize(file_id="photo_large", file_unique_id="uniq_2", width=800, height=800),
+        ],
+    )
+    cmd_user = create_user(user_id=999, name="LetterWriter")
+    cmd_msg = create_message(
+        text="/q Шановний друже, надсилаю цей сувій.",
+        user=cmd_user,
+        reply_to=replied_photo_msg,
+    )
+    fake_jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 1000
+
+    with (
+        patch(
+            "handlers.quote.download_telegram_file_id",
+            new_callable=AsyncMock,
+            return_value=b"seal_image_bytes",
+        ) as mock_dl,
+        patch(
+            "handlers.quote.quote_service.async_render_quote", new_callable=AsyncMock
+        ) as mock_render,
+    ):
+        mock_render.return_value = fake_jpeg
+        await quote_command_handler(cmd_msg, bot)
+
+        # Photo from replied message was downloaded for the seal
+        mock_dl.assert_awaited_once_with(bot, "photo_large")
+        mock_render.assert_awaited_once()
+        kwargs = mock_render.call_args.kwargs
+        assert kwargs["text"] == "Шановний друже, надсилаю цей сувій."
+        assert kwargs["author_name"] == "LetterWriter"
+        assert kwargs["avatar_bytes"] == b"seal_image_bytes"
+        bot.send_photo.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_quote_reply_to_photo_no_text_shows_hint():
+    bot = create_mock_bot()
+    replied_photo_msg = Message(
+        message_id=200,
+        date=datetime.now(UTC),
+        chat=Chat(id=-100123456789, type="supergroup"),
+        from_user=create_user(),
+        photo=[PhotoSize(file_id="photo_large", file_unique_id="uniq_3", width=800, height=800)],
+    )
+    cmd_msg = create_message(text="/q", reply_to=replied_photo_msg)
+
+    with patch("handlers.quote.safe_reply", new_callable=AsyncMock) as mock_safe_reply:
+        await quote_command_handler(cmd_msg, bot)
+        mock_safe_reply.assert_awaited_once()
+        hint_text = mock_safe_reply.call_args.args[1]
+        assert "Лист із зображенням на печатці" in hint_text
+
+
+@pytest.mark.asyncio
+async def test_quote_explicit_author_parsing():
+    bot = create_mock_bot()
+    msg = create_message(text="/q Борітеся — поборете! — Тарас Шевченко")
+    fake_jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 1000
+
+    with patch(
+        "handlers.quote.quote_service.async_render_quote", new_callable=AsyncMock
+    ) as mock_render:
+        mock_render.return_value = fake_jpeg
+        await quote_command_handler(msg, bot)
+
+        mock_render.assert_awaited_once()
+        kwargs = mock_render.call_args.kwargs
+        assert kwargs["text"] == "Борітеся — поборете!"
+        assert kwargs["author_name"] == "Тарас Шевченко"

@@ -87,3 +87,26 @@ async def test_async_render_quote(quote_service: QuoteGeneratorService):
     assert isinstance(data, bytes)
     assert len(data) > 50000
     assert data[:2] == b"\xff\xd8"
+
+
+@pytest.mark.parametrize(
+    ("show_seal", "show_dropcap"),
+    [
+        (False, True),  # /qs
+        (True, False),  # /qf
+        (False, False),  # /qsf
+    ],
+)
+def test_render_quote_modifiers(
+    quote_service: QuoteGeneratorService, show_seal: bool, show_dropcap: bool
+):
+    data = quote_service.render_quote(
+        text="Лист без зайвих оздоблень, чисто суть.",
+        author_name="Писар",
+        template_name="Dagger",
+        show_seal=show_seal,
+        show_dropcap=show_dropcap,
+    )
+    assert isinstance(data, bytes)
+    assert len(data) > 30000
+    assert data[:2] == b"\xff\xd8"
