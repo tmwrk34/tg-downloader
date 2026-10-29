@@ -20,6 +20,13 @@ import aiohttp
 
 from services.db_base import SQLiteWALService, resolve_db_path
 from services.dice import DiceParser
+from services.memory import (
+    HybridMemoryManager,
+    MemoryEntry,
+    MemoryStats,
+    UserDossier,
+    is_meaningful_message,
+)
 from services.munito_ui import (
     AI_TOOLS,
     AVAILABLE_MODELS,
@@ -33,6 +40,7 @@ from services.munito_ui import (
     AIChatTurn,
     build_ai_keyboard,
     format_ai_card,
+    format_memory_card,
     get_next_context_mode,
     get_next_context_size,
     get_next_model,
@@ -73,6 +81,11 @@ class MunitoAIService(SQLiteWALService):
         resolved = str(db_path) if db_path is not None else resolve_default_ai_db()
         super().__init__(resolved)
         self._init_db()
+        self.memory_manager = HybridMemoryManager(
+            conn=self._conn,
+            lock=self._lock,
+            db_path=resolved,
+        )
 
         self._config_cache: dict[int, AIChatConfig] = {}
         self._stats_cache: dict[int, AIChatStats] = {}
@@ -304,6 +317,14 @@ class MunitoAIService(SQLiteWALService):
             )
             self._conn.commit()
 
+        if role == "user":
+            self.memory_manager.ingest_passive_turn(
+                chat_id=chat_id,
+                user_name=user_name,
+                user_id=user_id,
+                content=content,
+            )
+
     def _sync_get_chat_history(self, chat_id: int, limit: int = 10) -> list[AIChatTurn]:
         """Fetch the most recent turns for a chat in chronological order."""
         if limit <= 0:
@@ -400,6 +421,89 @@ class MunitoAIService(SQLiteWALService):
     async def clear_chat_history(self, chat_id: int) -> int:
         return await asyncio.to_thread(self._sync_clear_chat_history, chat_id)
 
+    async def remember_fact(
+        self,
+        chat_id: int,
+        content: str,
+        category: str = "fact",
+        subject: str = "",
+        participants: str = "",
+        importance: float | None = None,
+    ) -> tuple[MemoryEntry, bool]:
+        return await asyncio.to_thread(
+            self.memory_manager.add_memory,
+            chat_id,
+            content,
+            category,
+            subject,
+            participants,
+            importance,
+        )
+
+    async def search_memories(
+        self,
+        chat_id: int,
+        query: str,
+        top_k: int = 3,
+        min_score: float = 0.72,
+    ) -> list[MemoryEntry]:
+        return await asyncio.to_thread(
+            self.memory_manager.search_memories,
+            chat_id,
+            query,
+            top_k,
+            min_score,
+        )
+
+    async def forget_memory(self, chat_id: int, query: str) -> list[MemoryEntry]:
+        return await asyncio.to_thread(self.memory_manager.forget_memory, chat_id, query)
+
+    async def update_user_dossier(
+        self,
+        chat_id: int,
+        user_name: str,
+        trait_or_note: str,
+        user_id: int | None = None,
+        username: str | None = None,
+    ) -> UserDossier:
+        return await asyncio.to_thread(
+            self.memory_manager.update_user_dossier,
+            chat_id,
+            user_name,
+            trait_or_note,
+            user_id,
+            username,
+        )
+
+    async def get_user_dossiers(
+        self,
+        chat_id: int,
+        active_user_id: int | None = None,
+        active_user_name: str | None = None,
+        query_text: str | None = None,
+        limit: int = 5,
+    ) -> list[UserDossier]:
+        return await asyncio.to_thread(
+            self.memory_manager.get_user_dossiers,
+            chat_id,
+            active_user_id,
+            active_user_name,
+            query_text,
+            limit,
+        )
+
+    async def get_chat_lore(self, chat_id: int, limit: int = 8) -> list[MemoryEntry]:
+        return await asyncio.to_thread(self.memory_manager.get_chat_lore, chat_id, limit)
+
+    async def get_memory_stats(self, chat_id: int) -> MemoryStats:
+        return await asyncio.to_thread(self.memory_manager.get_stats, chat_id)
+
+    async def clear_long_term_memory(self, chat_id: int) -> int:
+        return await asyncio.to_thread(self.memory_manager.clear_long_term_memory, chat_id)
+
+    async def flush_episode_buffer(self, chat_id: int) -> MemoryEntry | None:
+        return await asyncio.to_thread(self.memory_manager.flush_episode_buffer, chat_id)
+
     async def _send_completion_request(
         self,
         session: aiohttp.ClientSession,
@@ -471,12 +575,17 @@ class MunitoAIService(SQLiteWALService):
             logger.error("Munito AI network connection error: %s", err)
             raise RuntimeError(f"Failed to connect to Munito AI: {err}") from err
 
-    @staticmethod
     def _execute_tool_calls(
+        self,
         tool_calls: list[dict[str, Any]],
         messages: list[dict[str, Any]],
+        chat_id: int | None = None,
+        user_id: int | None = None,
+        user_name: str | None = None,
     ) -> None:
-        """Evaluate requested tool calls (e.g. `roll_dice`) and append tool outputs to `messages`."""
+        """Evaluate requested tool calls (`roll_dice` and agentic memory tools) and append outputs to `messages`."""
+        target_chat_id = chat_id if chat_id is not None else 0
+
         for tc in tool_calls:
             call_id = tc.get("id") or "call_default"
             func_info = tc.get("function") or {}
@@ -486,6 +595,8 @@ class MunitoAIService(SQLiteWALService):
                 args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
             except Exception:
                 args = {}
+
+            tool_output: dict[str, Any] = {}
 
             if func_name == "roll_dice":
                 expr = str(args.get("expression") or "1d20").strip()
@@ -498,7 +609,7 @@ class MunitoAIService(SQLiteWALService):
                     elif roll_res.is_crit_fail:
                         crit_label = "CRITICAL FAIL (Natural 1!)"
 
-                    tool_output: dict[str, Any] = {
+                    tool_output = {
                         "expression": roll_res.normalized_expression,
                         "total": roll_res.total,
                         "constant_modifier": roll_res.constant_modifier,
@@ -511,14 +622,102 @@ class MunitoAIService(SQLiteWALService):
                         "error": f"Failed to parse or roll dice expression '{expr}': {exc}"
                     }
 
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "name": func_name,
-                        "content": json.dumps(tool_output, ensure_ascii=False),
+            elif func_name == "remember_fact":
+                category = str(args.get("category") or "fact").strip()
+                subject = str(args.get("subject") or "").strip()
+                fact = str(args.get("fact") or "").strip()
+                if not fact:
+                    tool_output = {"error": "Missing 'fact' content to remember."}
+                else:
+                    entry, is_new = self.memory_manager.add_memory(
+                        chat_id=target_chat_id,
+                        content=fact,
+                        category=category,
+                        subject=subject,
+                        participants=user_name or "",
+                    )
+                    tool_output = {
+                        "status": "saved" if is_new else "deduplicated_updated",
+                        "id": entry.id,
+                        "category": entry.category,
+                        "subject": entry.subject,
+                        "fact": entry.content,
                     }
+
+            elif func_name == "update_user_dossier":
+                target_user = str(args.get("user_name") or user_name or "Traveler").strip()
+                trait = str(args.get("trait_or_note") or "").strip()
+                if not trait:
+                    tool_output = {"error": "Missing 'trait_or_note' to record."}
+                else:
+                    matched_uid = (
+                        user_id
+                        if user_name and target_user.lower() == user_name.strip().lower()
+                        else None
+                    )
+                    dossier = self.memory_manager.update_user_dossier(
+                        chat_id=target_chat_id,
+                        user_name=target_user,
+                        trait_or_note=trait,
+                        user_id=matched_uid,
+                    )
+                    tool_output = {
+                        "status": "updated",
+                        "user_name": dossier.display_name,
+                        "traits": dossier.traits,
+                    }
+
+            elif func_name == "forget_fact":
+                query = str(args.get("query") or "").strip()
+                if not query:
+                    tool_output = {"error": "Missing 'query' to forget."}
+                else:
+                    removed = self.memory_manager.forget_memory(chat_id=target_chat_id, query=query)
+                    tool_output = {
+                        "status": "deleted" if removed else "not_found",
+                        "deleted_count": len(removed),
+                        "deleted_items": [r.content for r in removed],
+                    }
+
+            elif func_name == "search_tavern_archives":
+                query = str(args.get("query") or "").strip()
+                results = self.memory_manager.search_memories(
+                    chat_id=target_chat_id,
+                    query=query,
+                    top_k=5,
+                    min_score=0.35,
                 )
+                dossiers = self.memory_manager.get_user_dossiers(
+                    chat_id=target_chat_id,
+                    query_text=query,
+                    limit=3,
+                )
+                tool_output = {
+                    "query": query,
+                    "memories": [
+                        {
+                            "category": m.category,
+                            "subject": m.subject,
+                            "content": m.content,
+                            "score": m.score,
+                        }
+                        for m in results
+                    ],
+                    "dossiers": [
+                        {"user_name": d.display_name, "traits": d.traits} for d in dossiers
+                    ],
+                }
+            else:
+                continue
+
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": func_name,
+                    "content": json.dumps(tool_output, ensure_ascii=False),
+                }
+            )
 
     async def generate_reply(
         self,
@@ -570,6 +769,17 @@ class MunitoAIService(SQLiteWALService):
             full_text_prompt += prompt.strip()
         elif not image_bytes:
             full_text_prompt += "Explain or reply to this message."
+
+        if chat_id is not None and cfg is not None and cfg.context_size > 0:
+            memory_block = await asyncio.to_thread(
+                self.memory_manager.build_memory_context_block,
+                chat_id,
+                full_text_prompt,
+                user_id,
+                user_name,
+            )
+            if memory_block and messages and messages[0].get("role") == "system":
+                messages[0]["content"] += f"\n\n{memory_block}"
 
         user_display_prompt = (
             f"[{user_name}]: {full_text_prompt}" if user_name else full_text_prompt
@@ -663,7 +873,13 @@ class MunitoAIService(SQLiteWALService):
                     chat_id,
                 )
                 messages.append(message_obj)
-                self._execute_tool_calls(tool_calls, messages)
+                self._execute_tool_calls(
+                    tool_calls,
+                    messages,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    user_name=user_name,
+                )
 
                 followup_payload = dict(payload)
                 followup_payload["messages"] = messages
@@ -732,13 +948,19 @@ __all__ = [
     "AIChatConfig",
     "AIChatStats",
     "AIChatTurn",
+    "HybridMemoryManager",
+    "MemoryEntry",
+    "MemoryStats",
     "MunitoAIService",
+    "UserDossier",
     "build_ai_keyboard",
     "format_ai_card",
+    "format_memory_card",
     "get_next_context_mode",
     "get_next_context_size",
     "get_next_model",
     "get_next_reasoning_effort",
+    "is_meaningful_message",
     "markdown_to_telegram_html",
     "resolve_default_ai_db",
     "split_telegram_message",

@@ -78,21 +78,30 @@ A high-performance Telegram bot built with **aiogram 3** and **yt-dlp** for down
   - Uses candidate seed words from the user's message to anchor responses relevant to the ongoing conversation.
   - Reacts with thematic tavern emojis (`🤡`, `🎲`, `🍺`, `🔥`, `🗿`, `⚡`, `🫡`, `🤔`, etc.).
 
-### 🤖 Munito AI Assistant (Grok / DeepSeek)
-- **Tag & Reply Triggers**: Mention `@bard_taverna_bot <prompt>` or reply to any photo/message to invoke the AI assistant.
+### 🤖 Munito AI Assistant & Hybrid Tavern Memory (Grok / DeepSeek)
+- **Tag & Direct Reply Triggers**: Mention `@bard_taverna_bot <prompt>` or reply directly (`reply_to_message`) to any message from the bot to continue the conversation naturally without re-tagging.
+- **80/20 Tavern Keeper & Bard Persona**:
+  - **80% Grounded, Sharp-Witted Companion**: Speaks natural modern language (Ukrainian, Russian, English), answers coding/technical queries with razor-sharp clarity, and remembers the chat's regulars.
+  - **20% Organic Tavern Flavor**: Subtle nods to the tavern atmosphere without robotic corporate AI boilerplate.
+- **Hybrid Long-Term Memory Engine (`services/memory.py`)**:
+  - **Vector + Lexical BM25 Hybrid Search**: Combines 384-d embeddings (ONNX `fastembed` when installed + built-in multilingual morphological subword & n-gram projection engine) with **SQLite FTS5 BM25** (and optional **LanceDB** synchronization).
+  - **Smart Noise Gate & Episodic Chunking**: Automatically filters out short reactions (`"ахах"`, `"база"`, `"ок"`), bare URLs, and commands, grouping meaningful dialogue into 5-turn episodic scenes.
+  - **Cosine Deduplication & Token Budget**: Deduplicates redundant facts (`similarity > 0.90`) and dynamically injects `<tavern_lore>`, `<user_dossiers>`, and `<retrieved_memories>` within strict token budgets.
+  - **Agentic Memory Tool Calling**: Supports `roll_dice`, `remember_fact`, `update_user_dossier`, `forget_fact`, and `search_tavern_archives` tools during generation.
 - **Multimodal Vision**: Accurately analyzes photos and reply images using EU-hosted open models.
 - **Adjustable Reasoning Effort (CoT)**:
   - `⚡ Low (~15s)` (default): Limits chain-of-thought generation tokens, speeding up response times by 75% compared to unbounded reasoning.
   - `⚖️ Medium (~35s)`: Balanced thinking for deeper mathematical or code queries.
   - `🧠 High (~90s)`: Full chain-of-thought exploration for complex questions.
-- **Dynamic Model Switching**: Switch models on the fly between `deepseek-ai/deepseek-v4.1-flash-1017`, `deepseek-ai/deepseek-v4-flash`, `qwen/qwen3.8-27b`, `meta-llama/llama-4-scout-17b-16k`, and `google/gemma-4-12b`.
+- **Dynamic Model Switching**: Switch models on the fly between `deepseek-ai/deepseek-v4.1-flash-1017`, `deepseek-ai/deepseek-v4-flash`, `qwen/qwen3.8-27b`, `zai-org/glm-5.3-flash`, and `google/gemma-4-12b`.
 - **Telegram HTML Markdown Interpreter**: Formats headings, bold, italic, code blocks, bullet points, and inline links cleanly for Telegram with safe character escaping and plain-text fallback.
-- **Token Accounting & Settings (`/ai`)**:
-  - `/ai` — Interactive settings card with inline buttons to toggle state, switch models, adjust thinking effort, and view token usage.
-  - `/ai on` / `/ai off` — Enable or disable AI assistant for the chat.
-  - `/ai model <name>` — Set the active model.
-  - `/ai effort <low|medium|high>` — Set reasoning effort level.
-  - `/ai reset` — Reset chat token metrics.
+- **Commands & Settings (`/ai`, `/memory`)**:
+  - `/ai` — Interactive settings card with inline buttons to toggle state, switch models, adjust thinking effort, and view token/archive stats.
+  - `/memory` (aliases: `/lore`, `/досьє`) — Inspect long-term tavern archives, lore, and member dossiers.
+  - `/memory search <query>` — Search hybrid long-term memory (vector cosine + FTS5 BM25).
+  - `/memory remember <fact>` — Record permanent lore into the tavern ledger.
+  - `/memory dossier` — View structured member dossiers.
+  - `/memory clear` — Wipe long-term archives for the chat (Admin).
 
 ### 📜 Tavern Parchment Quote Generator (/q, /quote)
 - **Authentic Medieval Calligraphy Engine**:
