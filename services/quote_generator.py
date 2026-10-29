@@ -252,8 +252,15 @@ class QuoteGeneratorService:
         dropcap_char: str,
         max_w: int,
         max_h: int,
+        show_dropcap: bool = True,
     ) -> tuple[
-        list[str], ImageFont.FreeTypeFont, int, int, ImageFont.FreeTypeFont, tuple[int, ...], int
+        list[str],
+        ImageFont.FreeTypeFont,
+        int,
+        int,
+        ImageFont.FreeTypeFont | None,
+        tuple[int, ...] | None,
+        int,
     ]:
         """Dynamically scale font size from 116px down to 36px to fit 100% of quote within template bounds."""
         d_meas = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
@@ -262,18 +269,24 @@ class QuoteGeneratorService:
         for sz in [116, 104, 94, 84, 76, 68, 60, 52, 46, 40, 36]:
             font = ImageFont.truetype(font_path, sz)
             line_h = int(sz * 1.34)
-            dc_sz = int(sz * 2.2)
-            f_dc = ImageFont.truetype(self.font_dropcap_path, dc_sz)
-            dc_box = d_meas.textbbox((0, 0), dropcap_char, font=f_dc)
-            indent_w = (dc_box[2] - dc_box[0]) + 35
+            if show_dropcap and dropcap_char:
+                dc_sz = int(sz * 2.2)
+                f_dc = ImageFont.truetype(self.font_dropcap_path, dc_sz)
+                dc_box = d_meas.textbbox((0, 0), dropcap_char, font=f_dc)
+                indent_w = (dc_box[2] - dc_box[0]) + 35
+                max_indented = max_w - indent_w
+            else:
+                f_dc = None
+                dc_box = (0, 0, 0, 0)
+                indent_w = 0
+                max_indented = max_w
 
             lines: list[str] = []
             curr: list[str] = []
-            max_indented = max_w - indent_w
 
             for w in raw_words:
                 line_idx = len(lines)
-                cur_max = max_indented if line_idx < 2 else max_w
+                cur_max = max_indented if (show_dropcap and line_idx < 2) else max_w
                 test_line = " ".join(curr + [w])
                 length = d_meas.textlength(test_line, font=font) * 0.84
                 if length <= cur_max:
@@ -353,6 +366,8 @@ class QuoteGeneratorService:
         author_name: str,
         avatar_bytes: bytes | None = None,
         template_name: str | None = None,
+        show_seal: bool = True,
+        show_dropcap: bool = True,
     ) -> bytes:
         """Synchronously render an authentic parchment quote card returning JPEG bytes."""
         clean_text = text.strip() or "..."
@@ -376,7 +391,12 @@ class QuoteGeneratorService:
 
         clean_author = author_name.strip() or "Анонім"
         base_wax_col, powder_col = self.extract_noble_colors(avatar_bytes, clean_author)
-        dropcap_char, body_text = self._extract_dropcap_and_body(clean_text)
+
+        if show_dropcap:
+            dropcap_char, body_text = self._extract_dropcap_and_body(clean_text)
+        else:
+            dropcap_char = ""
+            body_text = clean_text
 
         lines, _font_marck, font_sz, line_h, font_dropcap, dc_bbox, indent_w = (
             self._fit_text_to_bounds(
@@ -385,6 +405,7 @@ class QuoteGeneratorService:
                 dropcap_char,
                 max_w=cfg["max_w"],
                 max_h=cfg["max_h"],
+                show_dropcap=show_dropcap,
             )
         )
 
@@ -397,18 +418,19 @@ class QuoteGeneratorService:
         start_x = cfg["start_x"]
         start_y = cfg["start_y"] + vert_offset
 
-        # Draw illuminated dropcap
-        dc_rgba = (base_wax_col[0], base_wax_col[1], base_wax_col[2], 255)
-        dc_x = start_x
-        dc_y = start_y - int(font_sz * 0.65) - dc_bbox[1]
-        d_layer.text((dc_x, dc_y), dropcap_char, font=font_dropcap, fill=dc_rgba)
+        # Draw illuminated dropcap (if enabled)
+        if show_dropcap and dropcap_char and font_dropcap and dc_bbox:
+            dc_rgba = (base_wax_col[0], base_wax_col[1], base_wax_col[2], 255)
+            dc_x = start_x
+            dc_y = start_y - int(font_sz * 0.65) - dc_bbox[1]
+            d_layer.text((dc_x, dc_y), dropcap_char, font=font_dropcap, fill=dc_rgba)
 
         base_slope_deg = 3.2
         base_tan = math.tan(math.radians(base_slope_deg))
 
         for line_idx, line in enumerate(lines):
             line_base_y = start_y + line_idx * line_h
-            origin_x = start_x + indent_w if line_idx < 2 else start_x + 10
+            origin_x = start_x + indent_w if (show_dropcap and line_idx < 2) else start_x + 10
             curr_x = float(origin_x)
 
             for word in line.split(" "):
@@ -484,28 +506,35 @@ class QuoteGeneratorService:
         arr[:, :, 3] = final_alpha * 255.0
         ink_layer = Image.fromarray(arr.astype(np.uint8), mode="RGBA")
 
-        # Generate 3D Wax Seal and composite with multi-layer drop shadows
-        seal_img = self._generate_3d_wax_seal(
-            avatar_bytes,
-            clean_author,
-            base_wax_col,
-            powder_col,
-            size=stamp_size,
-            seed=base_seed,
-        )
-        stamp_x = int(min(curr_x + 35, self.canvas_w - stamp_size - 130))
-        stamp_y = int(author_base_y - int(stamp_size * 0.40))
-        if stamp_x < curr_x + 10:
-            stamp_x = int(author_origin_x + 60)
-            stamp_y = int(author_base_y + 35)
+        # Generate 3D Wax Seal and composite with multi-layer drop shadows (if enabled)
+        if show_seal:
+            seal_img = self._generate_3d_wax_seal(
+                avatar_bytes,
+                clean_author,
+                base_wax_col,
+                powder_col,
+                size=stamp_size,
+                seed=base_seed,
+            )
+            stamp_x = int(min(curr_x + 35, self.canvas_w - stamp_size - 130))
+            stamp_y = int(author_base_y - int(stamp_size * 0.40))
+            if stamp_x < curr_x + 10:
+                stamp_x = int(author_origin_x + 60)
+                stamp_y = int(author_base_y + 35)
 
-        final_img = composite_seal_and_shadows(
-            bg=bg,
-            ink_layer=ink_layer,
-            seal_img=seal_img,
-            stamp_x=stamp_x,
-            stamp_y=stamp_y,
-        )
+            final_img = composite_seal_and_shadows(
+                bg=bg,
+                ink_layer=ink_layer,
+                seal_img=seal_img,
+                stamp_x=stamp_x,
+                stamp_y=stamp_y,
+            )
+        else:
+            final_img = composite_seal_and_shadows(
+                bg=bg,
+                ink_layer=ink_layer,
+                seal_img=None,
+            )
 
         buf = io.BytesIO()
         final_img.convert("RGB").save(buf, format="JPEG", quality=93, optimize=True)
@@ -517,6 +546,8 @@ class QuoteGeneratorService:
         author_name: str,
         avatar_bytes: bytes | None = None,
         template_name: str | None = None,
+        show_seal: bool = True,
+        show_dropcap: bool = True,
     ) -> bytes:
         """Asynchronously execute quote rendering in threadpool without blocking event loop."""
         return await asyncio.to_thread(
@@ -525,6 +556,8 @@ class QuoteGeneratorService:
             author_name,
             avatar_bytes,
             template_name,
+            show_seal=show_seal,
+            show_dropcap=show_dropcap,
         )
 
 

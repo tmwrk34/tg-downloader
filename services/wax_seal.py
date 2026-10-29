@@ -239,48 +239,54 @@ def render_3d_wax_seal(
 def composite_seal_and_shadows(
     bg: Image.Image,
     ink_layer: Image.Image,
-    seal_img: Image.Image,
-    stamp_x: int,
-    stamp_y: int,
+    seal_img: Image.Image | None = None,
+    stamp_x: int = 0,
+    stamp_y: int = 0,
 ) -> Image.Image:
     """
     Composite multi-layer physical cast shadows (ambient penumbra, directional body,
     contact occlusion), ink layer, and the 3D wax seal onto the parchment background.
+    If seal_img is None, composites ink layer directly onto the background parchment.
     """
     canvas_w, canvas_h = bg.size
-    stamp_size = seal_img.size[0]
-    sh_pad = 90
-    sh_dim = stamp_size + sh_pad * 2
-    wax_alpha = np.array(seal_img)[:, :, 3].astype(np.float32) / 255.0
-
-    padded_wax = np.zeros((sh_dim, sh_dim), dtype=np.float32)
-    padded_wax[sh_pad : sh_pad + stamp_size, sh_pad : sh_pad + stamp_size] = wax_alpha
-
-    base_sh_x = stamp_x - sh_pad
-    base_sh_y = stamp_y - sh_pad
-
-    shadow_specs = (
-        # (intensity_scale, blur_radius, rgb_color, offset_x, offset_y)
-        (85, 32, (28, 18, 12, 255), 22, 32),  # Diffuse ambient penumbra
-        (155, 16, (18, 12, 8, 255), 14, 20),  # Directional body shadow
-        (210, 4, (10, 6, 4, 255), 3, 4),  # Deep contact occlusion
-    )
-
     final_img = bg
-    for scale, blur_r, rgba_col, off_x, off_y in shadow_specs:
-        mask = Image.fromarray((padded_wax * scale).astype(np.uint8), mode="L").filter(
-            ImageFilter.GaussianBlur(blur_r)
+
+    if seal_img is not None:
+        stamp_size = seal_img.size[0]
+        sh_pad = 90
+        sh_dim = stamp_size + sh_pad * 2
+        wax_alpha = np.array(seal_img)[:, :, 3].astype(np.float32) / 255.0
+
+        padded_wax = np.zeros((sh_dim, sh_dim), dtype=np.float32)
+        padded_wax[sh_pad : sh_pad + stamp_size, sh_pad : sh_pad + stamp_size] = wax_alpha
+
+        base_sh_x = stamp_x - sh_pad
+        base_sh_y = stamp_y - sh_pad
+
+        shadow_specs = (
+            # (intensity_scale, blur_radius, rgb_color, offset_x, offset_y)
+            (85, 32, (28, 18, 12, 255), 22, 32),  # Diffuse ambient penumbra
+            (155, 16, (18, 12, 8, 255), 14, 20),  # Directional body shadow
+            (210, 4, (10, 6, 4, 255), 3, 4),  # Deep contact occlusion
         )
-        sh_layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-        sh_layer.paste(
-            Image.new("RGBA", (sh_dim, sh_dim), rgba_col),
-            (base_sh_x + off_x, base_sh_y + off_y),
-            mask,
-        )
-        final_img = Image.alpha_composite(final_img, sh_layer)
+
+        for scale, blur_r, rgba_col, off_x, off_y in shadow_specs:
+            mask = Image.fromarray((padded_wax * scale).astype(np.uint8), mode="L").filter(
+                ImageFilter.GaussianBlur(blur_r)
+            )
+            sh_layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+            sh_layer.paste(
+                Image.new("RGBA", (sh_dim, sh_dim), rgba_col),
+                (base_sh_x + off_x, base_sh_y + off_y),
+                mask,
+            )
+            final_img = Image.alpha_composite(final_img, sh_layer)
 
     final_img = Image.alpha_composite(final_img, ink_layer)
 
-    seal_placement = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-    seal_placement.paste(seal_img, (stamp_x, stamp_y), seal_img)
-    return Image.alpha_composite(final_img, seal_placement)
+    if seal_img is not None:
+        seal_placement = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        seal_placement.paste(seal_img, (stamp_x, stamp_y), seal_img)
+        final_img = Image.alpha_composite(final_img, seal_placement)
+
+    return final_img
