@@ -389,8 +389,8 @@ class QuoteGeneratorService:
             paper_fiber=paper_fiber,
         )
 
-        clean_author = author_name.strip() or "Анонім"
-        base_wax_col, powder_col = self.extract_noble_colors(avatar_bytes, clean_author)
+        clean_author = author_name.strip()
+        base_wax_col, powder_col = self.extract_noble_colors(avatar_bytes, clean_author or "Анонім")
 
         if show_dropcap:
             dropcap_char, body_text = self._extract_dropcap_and_body(clean_text)
@@ -474,22 +474,25 @@ class QuoteGeneratorService:
 
                 curr_x += 24.0
 
-        # Author signature
-        author_text = f"— {clean_author}"
+        # Author signature (if author name is provided)
         author_base_y = start_y + len(lines) * line_h + 65
         author_origin_x = start_x + 180
         curr_x = float(author_origin_x)
 
-        font_author = ImageFont.truetype(self.font_marck_path, int(font_sz * 0.90))
-        for ch in author_text:
-            px = int(np.clip(curr_x, 0, self.canvas_w - 15))
-            py = int(np.clip(author_base_y, 0, self.canvas_h - 15))
-            dx = curr_x - author_origin_x
-            y_baseline = author_base_y - (dx * base_tan) + p_comps["traj"][py, px] * 5.0
-            angle = -(base_slope_deg + p_comps["slant"][py, px] * 1.2)
-            glyph_img, adv, pad, pad_base = self._render_rotated_glyph(ch, font_author, angle, 1.04)
-            layer.paste(glyph_img, (int(curr_x - pad), int(y_baseline - pad_base)), glyph_img)
-            curr_x += adv * 0.90
+        if clean_author:
+            author_text = f"— {clean_author}"
+            font_author = ImageFont.truetype(self.font_marck_path, int(font_sz * 0.90))
+            for ch in author_text:
+                px = int(np.clip(curr_x, 0, self.canvas_w - 15))
+                py = int(np.clip(author_base_y, 0, self.canvas_h - 15))
+                dx = curr_x - author_origin_x
+                y_baseline = author_base_y - (dx * base_tan) + p_comps["traj"][py, px] * 5.0
+                angle = -(base_slope_deg + p_comps["slant"][py, px] * 1.2)
+                glyph_img, adv, pad, pad_base = self._render_rotated_glyph(
+                    ch, font_author, angle, 1.04
+                )
+                layer.paste(glyph_img, (int(curr_x - pad), int(y_baseline - pad_base)), glyph_img)
+                curr_x += adv * 0.90
 
         # Apply paper fiber texture & crease absorption to calligraphy ink layer
         arr = np.array(layer, dtype=np.float32)
