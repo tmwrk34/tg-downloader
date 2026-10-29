@@ -33,7 +33,6 @@ from services.munito_ui import (
     CONTEXT_MODE_OPTIONS,
     CONTEXT_SIZE_OPTIONS,
     DEFAULT_MODEL,
-    DEFAULT_SYSTEM_PROMPT,
     REASONING_EFFORT_LEVELS,
     AIChatConfig,
     AIChatStats,
@@ -47,6 +46,13 @@ from services.munito_ui import (
     get_next_reasoning_effort,
     markdown_to_telegram_html,
     split_telegram_message,
+)
+from services.prompt import (
+    DEFAULT_SYSTEM_PROMPT,
+    is_custom_prompt_active,
+    load_system_prompt,
+    reset_system_prompt,
+    save_system_prompt,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,7 +81,7 @@ class MunitoAIService(SQLiteWALService):
         if clean_base.endswith("/chat/completions"):
             clean_base = clean_base.removesuffix("/chat/completions").rstrip("/")
         self.base_url = clean_base
-        self.system_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+        self.system_prompt = system_prompt or load_system_prompt()
         self.timeout_seconds = timeout_seconds
 
         resolved = str(db_path) if db_path is not None else resolve_default_ai_db()
@@ -503,6 +509,41 @@ class MunitoAIService(SQLiteWALService):
 
     async def flush_episode_buffer(self, chat_id: int) -> MemoryEntry | None:
         return await asyncio.to_thread(self.memory_manager.flush_episode_buffer, chat_id)
+
+    def get_system_prompt(self, chat_id: int | None = None) -> str:
+        """
+        Get the current active system prompt.
+        If a chat_id has a chat-specific override, returns that.
+        Otherwise returns the global system prompt.
+        """
+        if chat_id is not None:
+            cfg = self._config_cache.get(chat_id)
+            if cfg and cfg.system_prompt:
+                return cfg.system_prompt
+        return self.system_prompt
+
+    def set_system_prompt(self, new_prompt: str, chat_id: int | None = None) -> Path:
+        """
+        Set and persist a new system prompt to storage.
+        Survives restarts and redeployments (saved to data/system_prompt.txt).
+        """
+        cleaned = new_prompt.strip()
+        saved_path = save_system_prompt(cleaned)
+        self.system_prompt = cleaned
+        return saved_path
+
+    def reset_system_prompt(self, chat_id: int | None = None) -> str:
+        """
+        Reset system prompt to the factory default template in prompts/system_prompt.txt.
+        Removes the persistent custom file.
+        """
+        reloaded = reset_system_prompt()
+        self.system_prompt = reloaded
+        return reloaded
+
+    def is_custom_prompt(self) -> bool:
+        """Check if custom system prompt is currently active."""
+        return is_custom_prompt_active()
 
     async def _send_completion_request(
         self,
@@ -960,8 +1001,12 @@ __all__ = [
     "get_next_context_size",
     "get_next_model",
     "get_next_reasoning_effort",
+    "is_custom_prompt_active",
     "is_meaningful_message",
+    "load_system_prompt",
     "markdown_to_telegram_html",
+    "reset_system_prompt",
     "resolve_default_ai_db",
+    "save_system_prompt",
     "split_telegram_message",
 ]
