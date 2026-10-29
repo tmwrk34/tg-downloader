@@ -308,3 +308,83 @@ async def test_quote_explicit_author_parsing(
         kwargs = mock_render.call_args.kwargs
         assert kwargs["text"] == expected_quote
         assert kwargs["author_name"] == expected_author
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cmd_text", "expected_template", "expected_seal", "expected_dropcap"),
+    [
+        ("/qd Текст цитати", "Dagger", True, True),
+        ("/qa Текст цитати", "Arrow", True, True),
+        ("/qb Текст цитати", "Basic", True, True),
+        ("/qe Текст цитати", "Ell", True, True),
+        ("/qo Текст цитати", "Fired", True, True),
+        ("/qsd Текст цитати", "Dagger", False, True),
+        ("/qfa Текст цитати", "Arrow", True, False),
+        ("/qsfd Текст цитати", "Dagger", False, False),
+        ("/q -d Текст цитати", "Dagger", True, True),
+        ("/q -t fired Текст цитати", "Fired", True, True),
+    ],
+)
+async def test_quote_background_template_selection(
+    cmd_text: str,
+    expected_template: str,
+    expected_seal: bool,
+    expected_dropcap: bool,
+):
+    bot = create_mock_bot()
+    msg = create_message(text=cmd_text)
+    fake_jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 1000
+
+    with patch(
+        "handlers.quote.quote_service.async_render_quote", new_callable=AsyncMock
+    ) as mock_render:
+        mock_render.return_value = fake_jpeg
+        await quote_command_handler(msg, bot)
+
+        mock_render.assert_awaited_once()
+        kwargs = mock_render.call_args.kwargs
+        assert kwargs["text"] == "Текст цитати"
+        assert kwargs["template_name"] == expected_template
+        assert kwargs["show_seal"] == expected_seal
+        assert kwargs["show_dropcap"] == expected_dropcap
+
+
+@pytest.mark.asyncio
+async def test_quote_author_suppression_standalone():
+    bot = create_mock_bot()
+    msg = create_message(text="/q Текст без підпису автора -")
+    fake_jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 1000
+
+    with patch(
+        "handlers.quote.quote_service.async_render_quote", new_callable=AsyncMock
+    ) as mock_render:
+        mock_render.return_value = fake_jpeg
+        await quote_command_handler(msg, bot)
+
+        mock_render.assert_awaited_once()
+        kwargs = mock_render.call_args.kwargs
+        assert kwargs["text"] == "Текст без підпису автора"
+        assert kwargs["author_name"] == ""
+
+
+@pytest.mark.asyncio
+async def test_quote_author_suppression_reply():
+    bot = create_mock_bot()
+    replied_user = create_user(user_id=777, name="Geralt of Rivia")
+    replied_msg = create_message(text="Зло — це зло, Стрегобор.", user=replied_user)
+    cmd_msg = create_message(text="/qfs -", reply_to=replied_msg)
+    fake_jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 1000
+
+    with patch(
+        "handlers.quote.quote_service.async_render_quote", new_callable=AsyncMock
+    ) as mock_render:
+        mock_render.return_value = fake_jpeg
+        await quote_command_handler(cmd_msg, bot)
+
+        mock_render.assert_awaited_once()
+        kwargs = mock_render.call_args.kwargs
+        assert kwargs["text"] == "Зло — це зло, Стрегобор."
+        assert kwargs["author_name"] == ""
+        assert kwargs["show_seal"] is False
+        assert kwargs["show_dropcap"] is False

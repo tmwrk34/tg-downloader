@@ -110,3 +110,14 @@ def test_render_quote_modifiers(
     assert isinstance(data, bytes)
     assert len(data) > 30000
     assert data[:2] == b"\xff\xd8"
+
+
+def test_render_quote_without_author(quote_service: QuoteGeneratorService):
+    data = quote_service.render_quote(
+        text="Мудрість без автора, народна приказка.",
+        author_name="",
+        template_name="Basic",
+    )
+    assert isinstance(data, bytes)
+    assert len(data) > 30000
+    assert data[:2] == b"\xff\xd8"

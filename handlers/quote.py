@@ -96,32 +96,129 @@ async def _download_avatar_bytes(
     return None
 
 
-@quote_router.message(
-    Command(
-        "q",
-        "qs",
-        "qf",
-        "qsf",
-        "qfs",
-        "quote",
-        "quotes",
-        "quotef",
-        "quotesf",
-        "quotefs",
-        "цитата",
-        "цитата_с",
-        "цитата_ф",
-        "цитата_сф",
-        "цитата_фс",
-    )
-)
+def _generate_quote_commands() -> list[str]:
+    """Generates all valid combinations of prefixes, modifiers, and template letters for aiogram Command."""
+    mods = ["", "s", "f", "sf", "fs"]
+    tpls = ["", "d", "b", "a", "e", "o"]
+    cmds: set[str] = set()
+    for prefix in ("q", "quote"):
+        for m in mods:
+            for t in tpls:
+                if m or t:
+                    cmds.add(f"{prefix}{m}{t}")
+                    cmds.add(f"{prefix}{t}{m}")
+                else:
+                    cmds.add(prefix)
+    cyr_mods = ["", "с", "ф", "сф", "фс"]
+    cyr_tpls = ["", "д", "б", "а", "е", "о"]
+    for prefix in ("цитата", "ц"):
+        for m in cyr_mods:
+            for t in cyr_tpls:
+                if m or t:
+                    cmds.add(f"{prefix}_{m}{t}".strip("_"))
+                    cmds.add(f"{prefix}_{t}{m}".strip("_"))
+                    cmds.add(f"{prefix}{m}{t}")
+                    cmds.add(f"{prefix}{t}{m}")
+                else:
+                    cmds.add(prefix)
+    return sorted(cmds)
+
+
+def parse_quote_command_modifiers(
+    cmd: str,
+    raw_args: str,
+) -> tuple[bool, bool, str | None, str]:
+    """
+    Parses layout modifiers (seal, dropcap), background template, and strips flags from raw args.
+    Returns: (show_seal, show_dropcap, template_name, cleaned_args)
+    """
+    cmd = (cmd or "q").lower()
+    show_seal = True
+    show_dropcap = True
+    template_name: str | None = None
+
+    # 1. Parse from command name suffix (e.g. "qsfd", "qd", "qsa", "quotesd")
+    suffix = ""
+    for prefix in ("quote", "цитата", "q", "ц"):
+        if cmd.startswith(prefix):
+            suffix = cmd[len(prefix) :].lstrip("_")
+            break
+
+    for ch in suffix:
+        if ch in ("s", "с"):
+            show_seal = False
+        elif ch in ("f", "ф"):
+            show_dropcap = False
+        elif ch in ("d", "д"):
+            template_name = "Dagger"
+        elif ch in ("b", "б"):
+            template_name = "Basic"
+        elif ch in ("a", "а"):
+            template_name = "Arrow"
+        elif ch in ("e", "е"):
+            template_name = "Ell"
+        elif ch in ("o", "о", "p", "п"):
+            template_name = "Fired"
+
+    # 2. Parse inline flags from raw_args if provided
+    tokens = raw_args.split()
+    remaining: list[str] = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        lt = t.lower()
+        if lt in ("-s", "--no-seal", "-безпечатки"):
+            show_seal = False
+        elif lt in ("-f", "--no-dropcap", "-безбуквиці", "-безбуквицы"):
+            show_dropcap = False
+        elif lt in ("-sf", "-fs", "-s-f", "-f-s"):
+            show_seal = False
+            show_dropcap = False
+        elif lt in ("-d", "--dagger"):
+            template_name = "Dagger"
+        elif lt in ("-b", "--basic"):
+            template_name = "Basic"
+        elif lt in ("-a", "--arrow"):
+            template_name = "Arrow"
+        elif lt in ("-e", "--ell"):
+            template_name = "Ell"
+        elif lt in ("-o", "-p", "--fired"):
+            template_name = "Fired"
+        elif lt in ("-t", "--template") and i + 1 < len(tokens):
+            nt = tokens[i + 1].lower()
+            if nt in ("d", "dagger", "кинджал"):
+                template_name = "Dagger"
+                i += 1
+            elif nt in ("b", "basic", "базовий"):
+                template_name = "Basic"
+                i += 1
+            elif nt in ("a", "arrow", "стріла"):
+                template_name = "Arrow"
+                i += 1
+            elif nt in ("e", "ell", "кутовий"):
+                template_name = "Ell"
+                i += 1
+            elif nt in ("o", "p", "f", "fired", "обпалений", "вогонь"):
+                template_name = "Fired"
+                i += 1
+            else:
+                remaining.append(t)
+        else:
+            remaining.append(t)
+        i += 1
+
+    cleaned_args = " ".join(remaining).strip()
+    return show_seal, show_dropcap, template_name, cleaned_args
+
+
+@quote_router.message(Command(*_generate_quote_commands()))
 async def quote_command_handler(
     message: Message, bot: Bot, command: CommandObject | None = None
 ) -> None:
     """
     Handles quote commands to generate medieval tavern parchment scrolls.
-    Supports modifier commands (/qs = no seal, /qf = no dropcap, /qsf = neither)
-    and custom text on replied images.
+    Supports modifier commands (/qs = no seal, /qf = no dropcap, /qsf = neither),
+    background template selection (/qd, /qb, /qa, /qe, /qo), and custom text on replied images.
     """
     reply = message.reply_to_message
 
@@ -137,55 +234,50 @@ async def quote_command_handler(
             if len(parts) > 1:
                 raw_args = parts[1].strip()
 
-    # Determine layout modifiers based on command alias
-    show_seal = True
-    show_dropcap = True
+    # Determine layout modifiers and background template
+    show_seal, show_dropcap, template_name, raw_args = parse_quote_command_modifiers(cmd, raw_args)
 
-    if cmd in ("qs", "quotes", "цитата_с"):
-        show_seal = False
-    elif cmd in ("qf", "quotef", "цитата_ф"):
-        show_dropcap = False
-    elif cmd in ("qsf", "qfs", "quotesf", "quotefs", "цитата_сф", "цитата_фс"):
-        show_seal = False
-        show_dropcap = False
-
-    # Also parse potential inline flags in command arguments
-    if raw_args:
-        tokens = raw_args.split()
-        remaining_tokens: list[str] = []
-        for token in tokens:
-            lower_t = token.lower()
-            if lower_t in ("-s", "--no-seal", "-безпечатки"):
-                show_seal = False
-            elif lower_t in ("-f", "--no-dropcap", "-безбуквиці", "-безбуквицы"):
-                show_dropcap = False
-            elif lower_t in ("-sf", "-fs", "-s-f", "-f-s"):
-                show_seal = False
-                show_dropcap = False
-            else:
-                remaining_tokens.append(token)
-        raw_args = " ".join(remaining_tokens).strip()
-
-    # Parse optional explicit author in args (supports —, –, --, -, or newline dash)
+    # Check for author suppression (standalone '-' or trailing dash)
+    suppress_author = False
     explicit_author: str | None = None
-    for sep in ("\n— ", "\n– ", "\n- ", " — ", " – ", " -- "):
-        if sep in raw_args:
-            parts = raw_args.rsplit(sep, 1)
-            if parts[0].strip() and parts[1].strip():
-                raw_args = parts[0].strip()
-                explicit_author = parts[1].strip()
+
+    raw_args = raw_args.strip()
+
+    if raw_args in ("-", "—", "–", "--"):
+        suppress_author = True
+        raw_args = ""
+    elif raw_args.endswith((" -", " —", " –", " --")):
+        for dash in (" -", " —", " –", " --"):
+            if raw_args.endswith(dash):
+                raw_args = raw_args[: -len(dash)].strip()
+                suppress_author = True
                 break
-    if not explicit_author and " - " in raw_args:
-        parts = raw_args.rsplit(" - ", 1)
-        candidate = parts[1].strip()
-        if (
-            parts[0].strip()
-            and candidate
-            and len(candidate) <= 60
-            and not candidate.endswith((".", "!", "?", ";"))
-        ):
-            raw_args = parts[0].strip()
-            explicit_author = candidate
+    elif raw_args.endswith(("\n-", "\n—", "\n–")):
+        for dash in ("\n-", "\n—", "\n–"):
+            if raw_args.endswith(dash):
+                raw_args = raw_args[: -len(dash)].strip()
+                suppress_author = True
+                break
+
+    if not suppress_author and raw_args:
+        for sep in ("\n— ", "\n– ", "\n- ", " — ", " – ", " -- "):
+            if sep in raw_args:
+                parts = raw_args.rsplit(sep, 1)
+                if parts[0].strip() and parts[1].strip():
+                    raw_args = parts[0].strip()
+                    explicit_author = parts[1].strip()
+                    break
+        if not explicit_author and " - " in raw_args:
+            parts = raw_args.rsplit(" - ", 1)
+            candidate = parts[1].strip()
+            if (
+                parts[0].strip()
+                and candidate
+                and len(candidate) <= 60
+                and not candidate.endswith((".", "!", "?", ";"))
+            ):
+                raw_args = parts[0].strip()
+                explicit_author = candidate
 
     target_text = ""
     author_name = ""
@@ -196,7 +288,9 @@ async def quote_command_handler(
         if raw_args:
             # Custom text provided in command message (e.g. letter over replied image)
             target_text = raw_args
-            if explicit_author:
+            if suppress_author:
+                author_name = ""
+            elif explicit_author:
                 author_name = explicit_author
             elif reply.photo:
                 # User wrote text for a letter with replied photo as seal
@@ -214,7 +308,9 @@ async def quote_command_handler(
         else:
             # Quoting replied message content
             target_text = reply.text or reply.caption or ""
-            if explicit_author:
+            if suppress_author:
+                author_name = ""
+            elif explicit_author:
                 author_name = explicit_author
             elif reply.forward_from:
                 author_name = reply.forward_from.full_name
@@ -232,7 +328,9 @@ async def quote_command_handler(
         # Command used standalone with text argument
         if raw_args:
             target_text = raw_args
-            if explicit_author:
+            if suppress_author:
+                author_name = ""
+            elif explicit_author:
                 author_name = explicit_author
             elif message.from_user:
                 author_name = message.from_user.full_name
@@ -243,12 +341,22 @@ async def quote_command_handler(
             usage_msg = (
                 "📜 <b>Як створити сувій цитати або лист:</b>\n\n"
                 "• <b>Відповіддю:</b> надішліть <code>/q</code> у відповідь на повідомлення мандрівника.\n"
-                "• <b>Лист із зображенням:</b> надішліть <code>/q &lt;текст&gt;</code> у відповідь на будь-яку картинку — вона стане гербовою печаткою!\n"
-                "• <b>Власний текст:</b> напишіть <code>/quote &lt;текст цитати&gt;</code>.\n\n"
-                "<b>Керування оформленням:</b>\n"
-                "• <code>/qs</code> — створити сувій <b>без печатки</b>\n"
-                "• <code>/qf</code> — створити сувій <b>без буквиці</b> (звичайний рукописний текст)\n"
-                "• <code>/qsf</code> або <code>/qfs</code> — сувій <b>без печатки та без буквиці</b>"
+                "• <b>Лист із зображенням:</b> надішліть <code>/q &lt;текст&gt;</code> у відповідь на картинку — вона стане 3D-печаткою!\n"
+                "• <b>З власним текстом:</b> напишіть <code>/quote &lt;текст цитати&gt;</code>.\n\n"
+                "<b>🎨 Вибір фону пергаменту (однією літерою):</b>\n"
+                "• <code>d</code> — <b>Dagger</b> (кинджал на дерев'яному столі)\n"
+                "• <code>b</code> — <b>Basic</b> (класичний пергамент із цвяхами)\n"
+                "• <code>a</code> — <b>Arrow</b> (пергамент зі стрілою/списом)\n"
+                "• <code>e</code> — <b>Ell</b> (старовинний кутовий сувій)\n"
+                "• <code>o</code> — <b>Fired</b> (обпалені вогнем краї)\n\n"
+                "<b>⚙️ Керування оформленням (модифікатори):</b>\n"
+                "• <code>s</code> — <b>без печатки</b> (наприклад, <code>/qs</code>, <code>/qsd</code>)\n"
+                "• <code>f</code> — <b>без буквиці</b> (наприклад, <code>/qf</code>, <code>/qfa</code>)\n"
+                "• <code>sf</code> — <b>без печатки та без буквиці</b> (наприклад, <code>/qsf</code>, <code>/qsfd</code>)\n"
+                "• <b>Без автора:</b> додайте <code>-</code> в кінці або дайте команду <code>/q -</code>\n\n"
+                "<i>💡 Усі літери можна комбінувати:</i> <code>/qd</code> (кинджал), <code>/qsa</code> (стріла без печатки), "
+                "<code>/qsfd</code> (чистий текст на кинджалі), <code>/qo</code> (обпалений). Також працюють прапорці: "
+                "<code>-d</code>, <code>-b</code>, <code>-a</code>, <code>-e</code>, <code>-o</code>, <code>-t dagger</code>."
             )
             await safe_reply(message, usage_msg, parse_mode="HTML")
             return
@@ -288,6 +396,7 @@ async def quote_command_handler(
             text=target_text,
             author_name=author_name,
             avatar_bytes=avatar_bytes,
+            template_name=template_name,
             show_seal=show_seal,
             show_dropcap=show_dropcap,
         )

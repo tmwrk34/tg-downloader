@@ -106,14 +106,24 @@ A high-performance Telegram bot built with **aiogram 3** and **yt-dlp** for down
   - **Realistic Multi-Layer Parchment Shadows**: Deep contact occlusion (tight edge shadow), directional body shadow (warm umber), and soft diffuse penumbra melting into paper folds.
   - **Exhaustive Avatar Fetching**: Multi-tier downloading supporting user profile photos, `get_chat.photo`, command photo attachments, replied media, and local Telegram Bot API filesystem volumes.
   - **Noble Monogram Fallback**: If no avatar is available, generates a Roman serif heraldic coat-of-arms with laurel wreath frame.
-- **Commands & Layout Modifiers**:
+- **Commands, Modifiers & Background Selection**:
   - `/q` or `/quote` or `/цитата` — Reply to any user message to engrave it onto parchment.
   - `/quote <text>` — Inscribe custom words as a quote scroll.
   - **Letters with Image Seals**: Reply to any picture with `/q <letter text>` — the picture becomes the 3D molten wax seal and the text is rendered as a medieval letter signed by the author.
-  - `/qs` (or `-s`, `--no-seal`) — Render quote scroll **without wax seal** (clean parchment with handwriting only).
-  - `/qf` (or `-f`, `--no-dropcap`) — Render quote scroll **without illuminated dropcap** (starts directly with normal cursive handwriting from left margin).
-  - `/qsf` or `/qfs` (or `-sf`) — Render **plain manuscript letter** without seal and without dropcap.
-  - Explicit Author: write `— Автор` or `- Автор` at the end of custom text to attribute to a specific name.
+  - **Single-Letter Background Selection**:
+    - `d` — **Dagger** (кинджал на столі): `/qd`, `/qsd`, `/qsfd`
+    - `b` — **Basic** (класичний пергамент із цвяхами): `/qb`, `/qsb`, `/qsfb`
+    - `a` — **Arrow** (стріла/спис у кутку): `/qa`, `/qsa`, `/qsfa`
+    - `e` — **Ell** (старовинний кутовий сувій): `/qe`, `/qse`, `/qsfe`
+    - `o` — **Fired** (обпалені краї): `/qo`, `/qso`, `/qsfo`
+  - **Layout Modifiers**:
+    - `s` (or `-s`, `--no-seal`) — Render quote scroll **without wax seal** (clean parchment with handwriting only).
+    - `f` (or `-f`, `--no-dropcap`) — Render quote scroll **without illuminated dropcap** (starts directly with normal cursive handwriting from left margin).
+    - `sf` or `fs` (or `-sf`) — Render **plain manuscript letter** without seal and without dropcap.
+  - **Author Control**:
+    - Explicit Author: write `— Автор` or `- Автор` at the end of custom text.
+    - Omit Author: add a trailing `-` (e.g. `/quote <text> -` or reply with `/q -`, `/qfs -`) to suppress author attribution and render the manuscript without a signature line.
+    - All modifiers can be freely combined (e.g. `/qsfd -` = Dagger parchment, no seal, no dropcap, no author).
 
 ### 🔒 Security & Access Control
 - **Whitelist Middleware**: Restricts all interactions strictly to chat IDs specified in `ALLOWED_CHAT_IDS`. Unauthorized messages are dropped silently.
