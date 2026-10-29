@@ -166,18 +166,26 @@ async def quote_command_handler(
                 remaining_tokens.append(token)
         raw_args = " ".join(remaining_tokens).strip()
 
-    # Parse optional explicit author in args (e.g. "Текст — Автор" or "Текст\n- Автор")
+    # Parse optional explicit author in args (supports —, –, --, -, or newline dash)
     explicit_author: str | None = None
-    if "— " in raw_args:
-        parts = raw_args.rsplit("— ", 1)
-        if parts[0].strip() and parts[1].strip():
+    for sep in ("\n— ", "\n– ", "\n- ", " — ", " – ", " -- "):
+        if sep in raw_args:
+            parts = raw_args.rsplit(sep, 1)
+            if parts[0].strip() and parts[1].strip():
+                raw_args = parts[0].strip()
+                explicit_author = parts[1].strip()
+                break
+    if not explicit_author and " - " in raw_args:
+        parts = raw_args.rsplit(" - ", 1)
+        candidate = parts[1].strip()
+        if (
+            parts[0].strip()
+            and candidate
+            and len(candidate) <= 60
+            and not candidate.endswith((".", "!", "?", ";"))
+        ):
             raw_args = parts[0].strip()
-            explicit_author = parts[1].strip()
-    elif "\n- " in raw_args:
-        parts = raw_args.rsplit("\n- ", 1)
-        if parts[0].strip() and parts[1].strip():
-            raw_args = parts[0].strip()
-            explicit_author = parts[1].strip()
+            explicit_author = candidate
 
     target_text = ""
     author_name = ""

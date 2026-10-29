@@ -266,9 +266,36 @@ async def test_quote_reply_to_photo_no_text_shows_hint():
 
 
 @pytest.mark.asyncio
-async def test_quote_explicit_author_parsing():
+@pytest.mark.parametrize(
+    ("input_text", "expected_quote", "expected_author"),
+    [
+        (
+            "/q Борітеся — поборете! — Тарас Шевченко",
+            "Борітеся — поборете!",
+            "Тарас Шевченко",
+        ),
+        (
+            "/q Я знаю, що нічого не знаю - Сократ",
+            "Я знаю, що нічого не знаю",
+            "Сократ",
+        ),
+        (
+            "/q Світ ловив мене, та не спіймав -- Сковорода",
+            "Світ ловив мене, та не спіймав",
+            "Сковорода",
+        ),
+        (
+            "/q Світає, край неба палає\n- Шевченко",
+            "Світає, край неба палає",
+            "Шевченко",
+        ),
+    ],
+)
+async def test_quote_explicit_author_parsing(
+    input_text: str, expected_quote: str, expected_author: str
+):
     bot = create_mock_bot()
-    msg = create_message(text="/q Борітеся — поборете! — Тарас Шевченко")
+    msg = create_message(text=input_text)
     fake_jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 1000
 
     with patch(
@@ -279,5 +306,5 @@ async def test_quote_explicit_author_parsing():
 
         mock_render.assert_awaited_once()
         kwargs = mock_render.call_args.kwargs
-        assert kwargs["text"] == "Борітеся — поборете!"
-        assert kwargs["author_name"] == "Тарас Шевченко"
+        assert kwargs["text"] == expected_quote
+        assert kwargs["author_name"] == expected_author
