@@ -13,18 +13,27 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are Bard (Бард), a witty, observant, and genuinely helpful AI assistant and digital companion in this Telegram chat and tavern.\n\n"
+    "You are Bard (Бард / Муніто), the sharp-witted tavern keeper, chronicler, and resident companion of this Telegram chat.\n\n"
+    "Persona Calibration (80/20 Rule):\n"
+    "- 80% Grounded, Sharp-Witted Regular: Speak natural, modern language like a clever, slightly cynical friend who knows everyone in the room. When asked technical, coding, or practical questions, answer directly and accurately without theatrical graphomania.\n"
+    "- 20% Tavern Keeper & Bard Flavor: Weave in subtle, organic nods to the tavern atmosphere (a mug of ale, dice on the oak table, the tavern ledger, hearth fire) only where it fits naturally. Never use corporate AI clichés ('As an AI...', 'How can I assist you today?').\n\n"
     "Identity & Capabilities:\n"
     "- Your name is Bard (@bard_taverna_bot).\n"
     "- You are the heart of this tavern bot. Your actual capabilities include:\n"
     "  1. Media Downloader: Automatically downloads videos and audio from TikTok, YouTube, Instagram Reels/Posts, and Pinterest when users share links in the chat.\n"
     "  2. Tabletop Dice Roller: Rolls dice for tabletop RPGs (D&D, Pathfinder, etc.) via /roll (e.g. /roll 2d20+5, 1d100, 4d6kh3, or natural requests like 'кинь d20').\n"
-    "  3. AI Assistant & Vision: You understand images/photos, answer questions, provide summaries, and maintain rolling conversation context memory per chat.\n"
-    "  4. Tavern Chatter: You learn local chat lore and occasionally chime in with humor or reactions.\n"
+    "  3. AI Assistant & Vision: You understand images/photos, answer questions, provide summaries, and maintain both rolling working context and long-term hybrid memory per chat.\n"
+    "  4. Tavern Scrolls & Quotes: Forges medieval parchment scrolls with 3D wax seals via /q or /quote.\n"
+    "  5. Tavern Chatter: You learn local chat lore and occasionally chime in with humor or reactions.\n"
     "- If asked who you are or what you can do, proudly describe your identity and features as Bard without mentioning underlying cloud or model providers (like Munito, DeepSeek, or Qwen) unless explicitly asked about technical architecture.\n\n"
-    "Tool Usage:\n"
-    "- You have access to real tools such as roll_dice to execute cryptographically secure tabletop dice rolls.\n"
-    "- Whenever a user asks you to roll a die, make a skill check, roll for initiative/damage, or settle a dispute with dice, ALWAYS invoke the roll_dice tool instead of guessing or hallucinating numbers.\n\n"
+    "Memory & Tool Usage:\n"
+    "- You may receive dynamic XML context blocks (<tavern_lore>, <user_dossiers>, <retrieved_memories>) containing facts, user traits, and past episodes from this chat. Use them naturally as your own memory without exposing raw XML tags.\n"
+    "- You have access to real tools:\n"
+    "  • roll_dice: Execute cryptographically secure tabletop dice rolls. Whenever a user asks you to roll a die, make a skill check, roll for initiative/damage, or settle a dispute with dice, ALWAYS invoke the roll_dice tool instead of guessing or hallucinating numbers.\n"
+    "  • remember_fact: Save memorable group lore, inside jokes, rules, decisions, or facts when someone asks you to remember something or shares an important detail.\n"
+    "  • update_user_dossier: Record or update notable traits, preferences, roles, or nicknames for a chat member in their Tavern Dossier.\n"
+    "  • forget_fact: Delete outdated or unwanted facts from the tavern memory when asked to forget.\n"
+    "  • search_tavern_archives: Search deeper across historical chat episodes and lore when asked about past events ('Пам'ятаєш...', 'Хто казав...').\n\n"
     "Communication Style:\n"
     "- Always respond in the exact same language as the user's current prompt or message (e.g. if asked in Ukrainian, reply in Ukrainian; if asked in Russian, reply in Russian; if asked in English, reply in English).\n"
     "- Be witty, charismatic, and concise. Avoid robotic filler, repetitive disclaimers, or corporate apologies.\n"
@@ -55,7 +64,96 @@ AI_TOOLS: list[dict[str, Any]] = [
                 "required": ["expression"],
             },
         },
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remember_fact",
+            "description": (
+                "Save an important fact, inside joke, group rule, decision, or event into long-term tavern memory for this chat."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "enum": ["lore", "fact", "inside_joke", "rule", "event"],
+                        "description": "Category of the memory entry.",
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Short topic or subject header (e.g. 'Сервер', 'Правило таверни', 'Мем про каву').",
+                    },
+                    "fact": {
+                        "type": "string",
+                        "description": "The concise, self-contained fact or lore statement to remember.",
+                    },
+                },
+                "required": ["subject", "fact"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_user_dossier",
+            "description": (
+                "Add or update a personal trait, hobby, preference, nickname, or role in the Tavern Dossier for a specific chat member."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_name": {
+                        "type": "string",
+                        "description": "Display name or @username of the chat member.",
+                    },
+                    "trait_or_note": {
+                        "type": "string",
+                        "description": "Concise trait or fact about this user (e.g. 'Грає за паладина в D&D', 'Пише на Python та Rust').",
+                    },
+                },
+                "required": ["user_name", "trait_or_note"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "forget_fact",
+            "description": (
+                "Remove a specific outdated or unwanted fact/memory from the chat's long-term tavern archives."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Keywords or description of the memory to delete.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_tavern_archives",
+            "description": (
+                "Search the chat's long-term hybrid memory archives (past episodes, lore, and user dossiers) for specific topics or events."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query or keywords to look up in past conversations and lore.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 DEFAULT_MODEL = "deepseek-ai/deepseek-v4.1-flash-1017"
@@ -143,6 +241,7 @@ def format_ai_card(
     cfg: AIChatConfig,
     stats: AIChatStats,
     history_count: int = 0,
+    memory_stats: Any = None,
 ) -> str:
     """Format AI assistant status, model, context memory, and token usage into an HTML message."""
     status_str = "🟢 Enabled" if cfg.enabled else "🔴 Disabled"
@@ -164,6 +263,14 @@ def format_ai_card(
     else:
         memory_str = "⚪ Disabled (0 msgs)"
 
+    archive_line = ""
+    if memory_stats is not None:
+        archive_line = (
+            f"📚 <b>Archives:</b> <code>{memory_stats.total_memories} memories "
+            f"({memory_stats.lore_count} lore, {memory_stats.episodic_count} episodes), "
+            f"{memory_stats.dossier_count} dossiers</code>\n"
+        )
+
     return (
         f"🤖 <b>Munito AI Assistant Settings</b>\n"
         f"<b>Chat:</b> <code>{chat_title}</code> (<code>{chat_id}</code>)\n"
@@ -172,6 +279,7 @@ def format_ai_card(
         f"🧠 <b>Model:</b> <code>{cfg.model}</code>\n"
         f"💭 <b>Thinking:</b> <code>{effort_display}</code>\n"
         f"💬 <b>Memory:</b> <code>{memory_str}</code>\n"
+        f"{archive_line}"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Token Usage:</b>\n"
         f"  • Total requests: <b>{stats.request_count:,}</b>\n"
@@ -179,8 +287,58 @@ def format_ai_card(
         f"  • Generated tokens: <b>{stats.completion_tokens:,}</b>\n"
         f"  • Total tokens: <b>{stats.total_tokens:,}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Triggered exclusively via bot tag: @bot &lt;prompt&gt;</i>"
+        f"<i>Triggered via @bot &lt;prompt&gt;, direct reply to bot, or /memory</i>"
     )
+
+
+def format_memory_card(
+    chat_title: str,
+    chat_id: int,
+    memory_stats: Any,
+    lore_items: list[Any],
+    dossiers: list[Any],
+) -> str:
+    """Format Tavern Archives & Dossiers card for `/memory` command."""
+    lines = [
+        "📚 <b>Tavern Archives &amp; Hybrid Memory</b>",
+        f"<b>Chat:</b> <code>{html.escape(chat_title)}</code> (<code>{chat_id}</code>)",
+        "━━━━━━━━━━━━━━━━━━━",
+        f"🧠 <b>Total Stored Memories:</b> <b>{memory_stats.total_memories}</b> "
+        f"(Lore/Facts: <b>{memory_stats.lore_count}</b> | Episodes: <b>{memory_stats.episodic_count}</b>)",
+        f"🗂 <b>Member Dossiers:</b> <b>{memory_stats.dossier_count}</b>",
+        f"⏳ <b>Episode Buffer:</b> <code>{memory_stats.buffered_turns}/5 turns</code>",
+        "━━━━━━━━━━━━━━━━━━━",
+    ]
+
+    if lore_items:
+        lines.append("📜 <b>Tavern Lore &amp; Facts:</b>")
+        for item in lore_items[:6]:
+            subj = f"<b>[{html.escape(item.subject)}]</b> " if item.subject else ""
+            lines.append(f"  • {subj}{html.escape(item.content)}")
+    else:
+        lines.append("📜 <b>Tavern Lore:</b> <i>No permanent lore recorded yet.</i>")
+
+    lines.append("")
+    if dossiers:
+        lines.append("🎭 <b>Tavern Dossiers:</b>")
+        for d in dossiers[:5]:
+            uname = f" (@{html.escape(d.username)})" if d.username else ""
+            traits = "; ".join(html.escape(t) for t in d.traits[-5:])
+            lines.append(f"  • <b>{html.escape(d.display_name)}</b>{uname}: {traits}")
+    else:
+        lines.append("🎭 <b>Tavern Dossiers:</b> <i>No member dossiers recorded yet.</i>")
+
+    lines.extend(
+        [
+            "━━━━━━━━━━━━━━━━━━━",
+            "<b>Commands:</b>",
+            "• <code>/memory search &lt;query&gt;</code> — Hybrid vector + BM25 search",
+            "• <code>/memory remember &lt;fact&gt;</code> — Add lore to the tavern ledger",
+            "• <code>/memory dossier</code> — View member dossiers",
+            "• <code>/memory clear</code> — Wipe long-term archives (Admin)",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def build_ai_keyboard(

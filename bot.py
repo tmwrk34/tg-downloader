@@ -86,6 +86,7 @@ from handlers.ai import (  # noqa: E402
     ai_callback_handler,
     ai_command_handler,
     chatter_message_listener,
+    memory_command_handler,
 )
 from handlers.base import (  # noqa: E402
     HELP_MANUAL_HTML,
@@ -195,6 +196,7 @@ __all__ = [
     "main",
     "media_cache",
     "media_url_handler",
+    "memory_command_handler",
     "munito_service",
     "natural_dice_handler",
     "ping_handler",

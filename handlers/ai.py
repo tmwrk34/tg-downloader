@@ -12,6 +12,7 @@ from services.munito import (
     AVAILABLE_MODELS,
     build_ai_keyboard,
     format_ai_card,
+    format_memory_card,
     get_next_context_mode,
     get_next_context_size,
     get_next_model,
@@ -214,7 +215,10 @@ async def ai_command_handler(message: Message, command: CommandObject) -> None:
         elif subcmd in {"forget", "забудь", "clear_memory", "clearmem", "очистити_пам'ять"}:
             deleted = await bot.munito_service.clear_chat_history(chat_id)
             stats = await bot.munito_service.get_chat_stats(chat_id)
-            text = format_ai_card(chat_title, chat_id, cfg, stats, history_count=0)
+            mem_stats = await bot.munito_service.get_memory_stats(chat_id)
+            text = format_ai_card(
+                chat_title, chat_id, cfg, stats, history_count=0, memory_stats=mem_stats
+            )
             keyboard = build_ai_keyboard(chat_id, cfg)
             await safe_reply(
                 message,
@@ -228,7 +232,15 @@ async def ai_command_handler(message: Message, command: CommandObject) -> None:
             await bot.munito_service.reset_chat_stats(chat_id)
             stats = await bot.munito_service.get_chat_stats(chat_id)
             history_count = await bot.munito_service.get_history_count(chat_id)
-            text = format_ai_card(chat_title, chat_id, cfg, stats, history_count=history_count)
+            mem_stats = await bot.munito_service.get_memory_stats(chat_id)
+            text = format_ai_card(
+                chat_title,
+                chat_id,
+                cfg,
+                stats,
+                history_count=history_count,
+                memory_stats=mem_stats,
+            )
             keyboard = build_ai_keyboard(chat_id, cfg)
             await safe_reply(
                 message,
@@ -240,9 +252,123 @@ async def ai_command_handler(message: Message, command: CommandObject) -> None:
 
     stats = await bot.munito_service.get_chat_stats(chat_id)
     history_count = await bot.munito_service.get_history_count(chat_id)
-    text = format_ai_card(chat_title, chat_id, cfg, stats, history_count=history_count)
+    mem_stats = await bot.munito_service.get_memory_stats(chat_id)
+    text = format_ai_card(
+        chat_title, chat_id, cfg, stats, history_count=history_count, memory_stats=mem_stats
+    )
     keyboard = build_ai_keyboard(chat_id, cfg)
     await safe_reply(message, text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@ai_router.message(Command("memory", "lore", "досьє", "память", "пам'ять"))
+async def memory_command_handler(message: Message, command: CommandObject | None = None) -> None:
+    """Inspect, search, add, or clear long-term hybrid tavern memories and member dossiers."""
+    import html as html_lib
+
+    chat_id = message.chat.id
+    chat_title = message.chat.title or message.chat.first_name or "Private Chat"
+    user_id = message.from_user.id if message.from_user else 0
+    user_name = message.from_user.first_name if message.from_user else "Traveler"
+
+    raw_args = (command.args or "").strip() if command else ""
+    parts = raw_args.split(maxsplit=1)
+    subcmd = parts[0].lower() if parts else ""
+    rest = parts[1].strip() if len(parts) > 1 else ""
+
+    if subcmd in {"search", "find", "пошук"}:
+        if not rest:
+            await safe_reply(
+                message,
+                "🔍 Usage: <code>/memory search &lt;query&gt;</code>",
+                parse_mode="HTML",
+            )
+            return
+        results = await bot.munito_service.search_memories(
+            chat_id, query=rest, top_k=5, min_score=0.30
+        )
+        if not results:
+            await safe_reply(
+                message,
+                f"🔍 <b>Tavern Archives:</b> No matching memories found for <code>{html_lib.escape(rest)}</code>.",
+                parse_mode="HTML",
+            )
+            return
+        lines = [f"🔍 <b>Search Results for</b> <code>{html_lib.escape(rest)}</code>:"]
+        for m in results:
+            subj = f"<b>[{html_lib.escape(m.subject)}]</b> " if m.subject else ""
+            lines.append(
+                f"• ({m.category}, score={m.score:.2f}) {subj}{html_lib.escape(m.content)}"
+            )
+        await safe_reply(message, "\n".join(lines), parse_mode="HTML")
+        return
+
+    if subcmd in {"remember", "add", "save", "запам'ятай", "додати"}:
+        if not rest:
+            await safe_reply(
+                message,
+                "📝 Usage: <code>/memory remember &lt;fact or lore&gt;</code>",
+                parse_mode="HTML",
+            )
+            return
+        entry, is_new = await bot.munito_service.remember_fact(
+            chat_id=chat_id,
+            content=rest,
+            category="lore",
+            subject="Лор чату",
+            participants=user_name,
+        )
+        status_label = "Recorded new lore" if is_new else "Updated existing lore"
+        await safe_reply(
+            message,
+            f"📜 <b>{status_label} (#{entry.id}):</b> {html_lib.escape(entry.content)}",
+            parse_mode="HTML",
+        )
+        return
+
+    if subcmd in {"dossier", "dossiers", "досьє"}:
+        dossiers = await bot.munito_service.get_user_dossiers(
+            chat_id=chat_id,
+            active_user_id=user_id,
+            active_user_name=user_name,
+            limit=10,
+        )
+        if not dossiers:
+            await safe_reply(
+                message,
+                "🎭 <b>Tavern Dossiers:</b> No member traits recorded in this chat yet.",
+                parse_mode="HTML",
+            )
+            return
+        lines = ["🎭 <b>Tavern Member Dossiers:</b>"]
+        for d in dossiers:
+            uname = f" (@{html_lib.escape(d.username)})" if d.username else ""
+            traits = "; ".join(html_lib.escape(t) for t in d.traits)
+            lines.append(f"• <b>{html_lib.escape(d.display_name)}</b>{uname}: {traits}")
+        await safe_reply(message, "\n".join(lines), parse_mode="HTML")
+        return
+
+    if subcmd in {"clear", "wipe", "reset", "очистити"}:
+        if not await is_chat_admin(message.bot, chat_id, user_id):
+            await safe_reply(
+                message,
+                "⚠️ Only chat administrators can wipe long-term tavern archives.",
+            )
+            return
+        deleted = await bot.munito_service.clear_long_term_memory(chat_id)
+        await safe_reply(
+            message,
+            f"🧹 <b>Long-term tavern archives wiped!</b> (Removed {deleted} entries)",
+            parse_mode="HTML",
+        )
+        return
+
+    mem_stats = await bot.munito_service.get_memory_stats(chat_id)
+    lore_items = await bot.munito_service.get_chat_lore(chat_id, limit=6)
+    dossiers = await bot.munito_service.get_user_dossiers(
+        chat_id, active_user_id=user_id, active_user_name=user_name, limit=5
+    )
+    card_html = format_memory_card(chat_title, chat_id, mem_stats, lore_items, dossiers)
+    await safe_reply(message, card_html, parse_mode="HTML")
 
 
 @ai_router.callback_query(F.data.startswith("ai:"))
@@ -311,7 +437,15 @@ async def ai_callback_handler(callback: CallbackQuery) -> None:
         chat_title = target_msg.chat.title or target_msg.chat.first_name or "Chat"
         stats = await bot.munito_service.get_chat_stats(target_chat_id)
         history_count = await bot.munito_service.get_history_count(target_chat_id)
-        text = format_ai_card(chat_title, target_chat_id, cfg, stats, history_count=history_count)
+        mem_stats = await bot.munito_service.get_memory_stats(target_chat_id)
+        text = format_ai_card(
+            chat_title,
+            target_chat_id,
+            cfg,
+            stats,
+            history_count=history_count,
+            memory_stats=mem_stats,
+        )
         keyboard = build_ai_keyboard(target_chat_id, cfg, confirm_reset=confirm_reset)
         try:
             await target_msg.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
@@ -324,14 +458,16 @@ async def chatter_message_listener(message: Message, active_bot: Bot | None = No
     """
     Message listener for group conversation:
     1. If explicitly tagged with @bot_username, routes to Munito AI assistant.
-    2. If AI memory mode is 'all', passively records chat message into conversation memory.
-    3. Otherwise, passes through to passive Markov chatterbot engine.
+    2. If replying directly to a message from the bot and Munito AI is enabled, routes to Munito AI.
+    3. If AI memory mode is 'all', passively records chat message into conversation memory.
+    4. Otherwise, passes through to passive Markov chatterbot engine.
     """
     raw_text = message.text or message.caption or ""
     if not raw_text or raw_text.startswith("/"):
         return
 
     current_bot = active_bot or message.bot
+    bot_user = await bot._get_cached_bot_user(current_bot) if current_bot else None
 
     # 1. Explicit mention check for Munito AI assistant
     if current_bot:
@@ -340,7 +476,24 @@ async def chatter_message_listener(message: Message, active_bot: Bot | None = No
             await _handle_ai_mention(message, prompt, current_bot)
             return
 
-    # 2. Passive conversational memory capture when mode is 'all'
+    is_reply_to_bot = bool(
+        message.reply_to_message
+        and message.reply_to_message.from_user
+        and bot_user
+        and message.reply_to_message.from_user.id == bot_user.id
+    )
+
+    # 2. Direct reply to a bot message routes to Munito AI when configured & enabled
+    if is_reply_to_bot and current_bot and bot.munito_service.is_configured:
+        try:
+            ai_cfg = await bot.munito_service.get_chat_config(message.chat.id)
+            if ai_cfg.enabled:
+                await _handle_ai_mention(message, raw_text.strip(), current_bot)
+                return
+        except Exception as e:
+            logger.debug("Failed checking AI config on direct reply: %s", e)
+
+    # 3. Passive conversational memory capture when mode is 'all'
     if bot.munito_service.is_configured:
         try:
             ai_cfg = await bot.munito_service.get_chat_config(message.chat.id)
@@ -361,7 +514,7 @@ async def chatter_message_listener(message: Message, active_bot: Bot | None = No
         except Exception as e:
             logger.debug("Failed to passively record message in AI context: %s", e)
 
-    # 3. Only text messages without @bot tag participate in Markov chatterbot
+    # 4. Only text messages without @bot tag participate in Markov chatterbot
     if not message.text:
         return
 
@@ -378,16 +531,8 @@ async def chatter_message_listener(message: Message, active_bot: Bot | None = No
         await set_message_reaction(message, reaction_emoji)
 
     # Check chatterbot keywords or reply to the bot without tag
-    bot_user = await bot._get_cached_bot_user(current_bot) if current_bot else None
     text_lower = message.text.lower()
-
     is_chatter_keyword = bool("бард" in text_lower or "дурачок" in text_lower)
-    is_reply_to_bot = bool(
-        message.reply_to_message
-        and message.reply_to_message.from_user
-        and bot_user
-        and message.reply_to_message.from_user.id == bot_user.id
-    )
 
     if bot.chatter_service.should_reply(
         cfg, is_mention_or_reply=(is_chatter_keyword or is_reply_to_bot)
