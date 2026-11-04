@@ -375,6 +375,51 @@ async def memory_command_handler(message: Message, command: CommandObject | None
         await safe_reply(message, "\n".join(lines), parse_mode="HTML")
         return
 
+    if subcmd in {"dedup", "дедуп"} or (
+        subcmd in {"dossier", "dossiers", "досьє"} and rest.lower() == "dedup"
+    ):
+        cleaned = await bot.munito_service.deduplicate_user_dossiers(chat_id)
+        dossiers = await bot.munito_service.get_user_dossiers(chat_id, limit=10)
+        lines = [
+            f"🧹 <b>Dossier Deduplication Complete!</b> (Cleaned/merged {cleaned} items)\n",
+            "🎭 <b>Cleaned Member Dossiers:</b>",
+        ]
+        if dossiers:
+            for d in dossiers:
+                uname = f" (@{html.escape(d.username)})" if d.username else ""
+                traits = "; ".join(html.escape(t) for t in d.traits)
+                lines.append(f"• <b>{html.escape(d.display_name)}</b>{uname}: {traits}")
+        else:
+            lines.append("<i>No member dossiers recorded yet.</i>")
+        await safe_reply(message, "\n".join(lines), parse_mode="HTML")
+        return
+
+    if subcmd in {"forget", "delete", "remove", "видалити", "забудь"}:
+        if not rest:
+            await safe_reply(
+                message,
+                "🗑 Usage: <code>/memory forget &lt;query or trait&gt;</code>",
+                parse_mode="HTML",
+            )
+            return
+        removed_memories = await bot.munito_service.forget_memory(chat_id, rest)
+        removed_dossier_traits = await bot.munito_service.forget_dossier_traits(chat_id, rest)
+        total = len(removed_memories) + len(removed_dossier_traits)
+        if total == 0:
+            await safe_reply(
+                message,
+                f"ℹ️ Nothing found to forget matching <code>{html.escape(rest)}</code> in lore or dossiers.",
+                parse_mode="HTML",
+            )
+            return
+        lines = [f"🗑 <b>Forgotten {total} items matching</b> <code>{html.escape(rest)}</code>:"]
+        for m in removed_memories:
+            lines.append(f"• [Lore/Episode] {html.escape(m.content)}")
+        for dt in removed_dossier_traits:
+            lines.append(f"• [Dossier: {html.escape(dt['user_name'])}] {html.escape(dt['trait'])}")
+        await safe_reply(message, "\n".join(lines), parse_mode="HTML")
+        return
+
     if subcmd in {"dossier", "dossiers", "досьє"}:
         d_parts = rest.split(maxsplit=2)
         if d_parts and d_parts[0].lower() in {"delete", "remove", "del", "видалити"}:
