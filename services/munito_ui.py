@@ -51,8 +51,8 @@ AI_TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "category": {
                         "type": "string",
-                        "enum": ["lore", "fact", "inside_joke", "rule", "event"],
-                        "description": "Category of the memory entry.",
+                        "enum": ["lore", "fact", "inside_joke", "rule", "event", "style"],
+                        "description": "Category of the memory entry (lore, fact, inside_joke, rule, event, or style).",
                     },
                     "subject": {
                         "type": "string",
@@ -315,13 +315,14 @@ def format_memory_card(
     dossiers: list[Any],
 ) -> str:
     """Format Tavern Archives & Dossiers card for `/memory` command."""
+    style_count = getattr(memory_stats, "style_count", 0)
     lines = [
         "📚 <b>Tavern Archives &amp; Hybrid Memory</b>",
         f"<b>Chat:</b> <code>{html.escape(chat_title)}</code> (<code>{chat_id}</code>)",
         "━━━━━━━━━━━━━━━━━━━",
         f"🧠 <b>Total Stored Memories:</b> <b>{memory_stats.total_memories}</b> "
         f"(Lore/Facts: <b>{memory_stats.lore_count}</b> | Episodes: <b>{memory_stats.episodic_count}</b>)",
-        f"🗂 <b>Member Dossiers:</b> <b>{memory_stats.dossier_count}</b>",
+        f"🗂 <b>Member Dossiers:</b> <b>{memory_stats.dossier_count}</b> | 💬 <b>Style Pearls:</b> <b>{style_count}</b>",
         f"⏳ <b>Episode Buffer:</b> <code>{memory_stats.buffered_turns}/5 turns</code>",
         "━━━━━━━━━━━━━━━━━━━",
     ]
