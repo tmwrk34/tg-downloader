@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Таверна: Техаський Холдем</title>
+    <!-- Telegram WebApp SDK -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header Info -->
+        <header class="table-header">
+            <div class="table-title">🎲 Таверна «Техаський Холдем»</div>
+            <div class="table-meta">
+                <span id="blind-info">Блайнди: 10/20</span>
+                <span id="connection-status" class="status-badge connected">Підключено</span>
+            </div>
+        </header>
+
+        <!-- Notification Banner -->
+        <div id="notice-banner" class="notice-banner hidden"></div>
+
+        <!-- Poker Table Felt Area -->
+        <main class="poker-table-container">
+            <div class="poker-felt">
+                <!-- Center: Pot & Community Cards -->
+                <div class="community-area">
+                    <div class="pot-display">
+                        <span class="chip-icon">🪙</span> Банк: <strong id="pot-amount">0</strong>
+                    </div>
+                    <div id="community-cards" class="card-slots">
+                        <div class="card-slot empty"></div>
+                        <div class="card-slot empty"></div>
+                        <div class="card-slot empty"></div>
+                        <div class="card-slot empty"></div>
+                        <div class="card-slot empty"></div>
+                    </div>
+                    <div id="action-summary" class="action-summary">Очікування гравців...</div>
+                </div>
+
+                <!-- 6 Table Seats -->
+                <div id="seat-0" class="seat seat-pos-0 empty" onclick="handleSeatClick(0)">
+                    <div class="seat-avatar">🪑</div>
+                    <div class="seat-name">Вільне місце</div>
+                    <div class="seat-chips"></div>
+                </div>
+                <div id="seat-1" class="seat seat-pos-1 empty" onclick="handleSeatClick(1)">
+                    <div class="seat-avatar">🪑</div>
+                    <div class="seat-name">Вільне місце</div>
+                    <div class="seat-chips"></div>
+                </div>
+                <div id="seat-2" class="seat seat-pos-2 empty" onclick="handleSeatClick(2)">
+                    <div class="seat-avatar">🪑</div>
+                    <div class="seat-name">Вільне місце</div>
+                    <div class="seat-chips"></div>
+                </div>
+                <div id="seat-3" class="seat seat-pos-3 empty" onclick="handleSeatClick(3)">
+                    <div class="seat-avatar">🪑</div>
+                    <div class="seat-name">Вільне місце</div>
+                    <div class="seat-chips"></div>
+                </div>
+                <div id="seat-4" class="seat seat-pos-4 empty" onclick="handleSeatClick(4)">
+                    <div class="seat-avatar">🪑</div>
+                    <div class="seat-name">Вільне місце</div>
+                    <div class="seat-chips"></div>
+                </div>
+                <div id="seat-5" class="seat seat-pos-5 empty" onclick="handleSeatClick(5)">
+                    <div class="seat-avatar">🪑</div>
+                    <div class="seat-name">Вільне місце</div>
+                    <div class="seat-chips"></div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Player Dashboard & Controls -->
+        <footer class="player-panel">
+            <div class="my-cards-area">
+                <div id="my-cards" class="my-cards">
+                    <div class="card-placeholder">🂠</div>
+                    <div class="card-placeholder">🂠</div>
+                </div>
+                <div id="hand-rank-badge" class="hand-badge hidden">Пара Тузів</div>
+            </div>
+
+            <!-- Controls (Active when my turn or lobby) -->
+            <div id="controls-container" class="controls-container">
+                <!-- Action Buttons -->
+                <div id="turn-actions" class="action-buttons hidden">
+                    <button id="btn-fold" class="btn btn-danger" onclick="sendAction('fold')">Пас</button>
+                    <button id="btn-check" class="btn btn-secondary" onclick="sendAction('check')">Чек</button>
+                    <button id="btn-call" class="btn btn-primary" onclick="sendAction('call')">Колл</button>
+                    <button id="btn-raise" class="btn btn-warning" onclick="toggleRaiseSlider()">Рейз</button>
+                </div>
+
+                <!-- Raise Slider Area -->
+                <div id="raise-panel" class="raise-panel hidden">
+                    <input type="range" id="raise-slider" min="20" max="1000" step="10" oninput="updateRaiseDisplay()">
+                    <div class="raise-presets">
+                        <button class="btn-sm" onclick="setRaisePreset('min')">Min</button>
+                        <button class="btn-sm" onclick="setRaisePreset('half_pot')">1/2 Pot</button>
+                        <button class="btn-sm" onclick="setRaisePreset('pot')">Pot</button>
+                        <button class="btn-sm" onclick="setRaisePreset('allin')">All-in</button>
+                    </div>
+                    <button class="btn btn-warning btn-block" onclick="sendRaise()">Підтвердити: <span id="raise-val">40</span> 🪙</button>
+                </div>
+
+                <!-- Lobby Buttons -->
+                <div id="lobby-actions" class="lobby-actions">
+                    <button id="btn-start" class="btn btn-success" onclick="sendStartHand()">▶️ Роздати карти</button>
+                    <button id="btn-stand" class="btn btn-outline" onclick="sendStand()">Встати з-за столу</button>
+                    <button id="btn-rebuy" class="btn btn-outline hidden" onclick="sendRebuy()">+ Ребай (1000)</button>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

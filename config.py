@@ -19,6 +19,8 @@ class AppConfig:
     munito_model: str = "deepseek-ai/deepseek-v4.1-flash-1017"
     munito_base_url: str = "https://api.munito.ai/inference/v1"
     munito_system_prompt: str | None = None
+    webapp_port: int = 8080
+    webapp_public_url: str | None = None
 
     @property
     def max_payload_bytes(self) -> int:
@@ -118,6 +120,12 @@ def load_config() -> AppConfig:
         else None
     )
 
+    webapp_port = _parse_positive_int("WEBAPP_PORT", 8080)
+    webapp_public_url = os.getenv("WEBAPP_PUBLIC_URL")
+    webapp_public_url = (
+        webapp_public_url.strip() if webapp_public_url and webapp_public_url.strip() else None
+    )
+
     return AppConfig(
         bot_token=token.strip(),
         allowed_chat_ids=all_ids,
@@ -130,4 +138,6 @@ def load_config() -> AppConfig:
         munito_model=munito_model,
         munito_base_url=munito_base_url,
         munito_system_prompt=munito_system_prompt,
+        webapp_port=webapp_port,
+        webapp_public_url=webapp_public_url,
     )

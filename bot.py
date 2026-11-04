@@ -21,6 +21,7 @@ from downloader import (
 from middlewares import WhitelistMiddleware
 from services.cache import MediaCache
 from services.chatter import ChatterService
+from services.games import GamesWebServer
 from services.munito import MunitoAIService
 from services.worker import MediaWorkerLimiter
 
@@ -51,6 +52,11 @@ munito_service = MunitoAIService(
 worker_limiter = MediaWorkerLimiter(
     max_concurrent_downloads=config.max_concurrent_downloads,
     max_concurrent_transcodes=config.max_concurrent_transcodes,
+)
+games_web_server = GamesWebServer(
+    bot_token=config.bot_token,
+    host="0.0.0.0",
+    port=config.webapp_port,
 )
 
 
@@ -156,7 +162,11 @@ async def main() -> None:
         bot = Bot(token=config.bot_token, session=session)
 
     logger.info("Bot successfully started. Press Ctrl+C to stop.")
-    await dp.start_polling(bot)
+    await games_web_server.start()
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await games_web_server.stop()
 
 
 if __name__ == "__main__":
