@@ -540,6 +540,27 @@ class MunitoAIService(SQLiteWALService):
     async def get_chat_lore(self, chat_id: int, limit: int = 8) -> list[MemoryEntry]:
         return await asyncio.to_thread(self.memory_manager.get_chat_lore, chat_id, limit)
 
+    async def get_chat_style_samples(self, chat_id: int, limit: int = 6) -> list[dict[str, str]]:
+        return await asyncio.to_thread(self.memory_manager.get_chat_style_samples, chat_id, limit)
+
+    async def record_chat_style(
+        self,
+        chat_id: int,
+        user_name: str,
+        phrase: str,
+        user_id: int | None = None,
+    ) -> bool:
+        return await asyncio.to_thread(
+            self.memory_manager.record_chat_style,
+            chat_id,
+            user_name,
+            phrase,
+            user_id,
+        )
+
+    async def get_recent_events(self, chat_id: int, limit: int = 2) -> list[MemoryEntry]:
+        return await asyncio.to_thread(self.memory_manager.get_recent_events, chat_id, limit)
+
     async def get_memory_stats(self, chat_id: int) -> MemoryStats:
         return await asyncio.to_thread(self.memory_manager.get_stats, chat_id)
 
@@ -716,6 +737,13 @@ class MunitoAIService(SQLiteWALService):
                         subject=subject,
                         participants=user_name or "",
                     )
+                    if category.lower() in ("style", "стиль", "pearl", "перл"):
+                        self.memory_manager.record_chat_style(
+                            chat_id=target_chat_id,
+                            user_name=user_name or "Traveler",
+                            phrase=fact,
+                            user_id=user_id,
+                        )
                     tool_output = {
                         "status": "saved" if is_new else "deduplicated_updated",
                         "id": entry.id,

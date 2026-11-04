@@ -138,6 +138,7 @@ class MemoryStats:
     episodic_count: int = 0
     dossier_count: int = 0
     buffered_turns: int = 0
+    style_count: int = 0
 
 
 @dataclass
@@ -148,10 +149,10 @@ class _BufferedTurn:
     timestamp: float
 
 
-def is_meaningful_message(text: str, min_chars: int = 25, min_words: int = 3) -> bool:
+def is_meaningful_message(text: str, min_chars: int = 8, min_words: int = 2) -> bool:
     """
     Smart Noise Gate: filters out commands, pure URLs, short one-word reactions,
-    and low-signal chatter before indexing into long-term episodic memory.
+    and low-signal chatter before indexing into long-term episodic and style memory.
     """
     if not text or not text.strip():
         return False
@@ -415,6 +416,23 @@ class HybridMemoryManager:
             )
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_ai_dossiers_chat ON ai_user_dossiers (chat_id, display_name);"
+            )
+
+            # Chat style samples & speech patterns per chat
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ai_chat_style (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    user_name TEXT NOT NULL,
+                    user_id INTEGER,
+                    phrase TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ai_style_chat ON ai_chat_style (chat_id, created_at DESC);"
             )
             self._conn.commit()
 
@@ -1394,6 +1412,127 @@ class HybridMemoryManager:
 
             return (prioritized + others)[:limit]
 
+    def record_chat_style(
+        self,
+        chat_id: int,
+        user_name: str,
+        phrase: str,
+        user_id: int | None = None,
+        max_samples_per_chat: int = 40,
+    ) -> bool:
+        """
+        Record a distinctive short chat turn into the chat's vernacular & style memory.
+        Filters out bot's own outputs and repetitive phrases.
+        """
+        clean_name = (user_name or "").strip()
+        clean_phrase = phrase.strip()
+        if not clean_phrase or is_bot_identity(clean_name):
+            return False
+
+        # Only capture concise, punchy vernacular messages (8 to 180 chars, 2 to 25 words)
+        if len(clean_phrase) < 8 or len(clean_phrase) > 180:
+            return False
+
+        words = _WORD_RE.findall(clean_phrase)
+        if len(words) < 2 or len(words) > 25:
+            return False
+
+        if _COMMAND_RE.match(clean_phrase) or _URL_RE.search(clean_phrase):
+            return False
+
+        now = time.time()
+        phrase_low = clean_phrase.lower()
+
+        with self._lock:
+            cursor = self._conn.cursor()
+            # Fast check: already recorded exact or substring in this chat?
+            cursor.execute(
+                """
+                SELECT id, phrase FROM ai_chat_style
+                WHERE chat_id = ?
+                ORDER BY created_at DESC LIMIT 20
+                """,
+                (chat_id,),
+            )
+            recent = cursor.fetchall()
+            for _r_id, r_phrase in recent:
+                r_low = str(r_phrase).strip().lower()
+                if phrase_low == r_low or phrase_low in r_low or r_low in phrase_low:
+                    return False
+
+            cursor.execute(
+                """
+                INSERT INTO ai_chat_style (chat_id, user_name, user_id, phrase, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (chat_id, clean_name, user_id, clean_phrase, now),
+            )
+
+            # Prune oldest if exceeds max_samples_per_chat
+            cursor.execute("SELECT COUNT(*) FROM ai_chat_style WHERE chat_id = ?", (chat_id,))
+            cnt_row = cursor.fetchone()
+            if cnt_row and int(cnt_row[0]) > max_samples_per_chat:
+                cursor.execute(
+                    """
+                    DELETE FROM ai_chat_style
+                    WHERE id IN (
+                        SELECT id FROM ai_chat_style
+                        WHERE chat_id = ?
+                        ORDER BY created_at ASC
+                        LIMIT ?
+                    )
+                    """,
+                    (chat_id, int(cnt_row[0]) - max_samples_per_chat),
+                )
+            self._conn.commit()
+            return True
+
+    def get_chat_style_samples(self, chat_id: int, limit: int = 6) -> list[dict[str, str]]:
+        """Retrieve recent vernacular and style pearls for `chat_id`."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT user_name, phrase
+                FROM ai_chat_style
+                WHERE chat_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            )
+            return [{"user_name": str(r[0]), "phrase": str(r[1])} for r in cursor.fetchall()]
+
+    def get_recent_events(self, chat_id: int, limit: int = 2) -> list[MemoryEntry]:
+        """Fetch the most recent episodic scene chunks or events for `chat_id`."""
+        with self._lock:
+            cursor = self._conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, chat_id, category, subject, content, participants, importance, created_at, updated_at
+                FROM ai_memories
+                WHERE chat_id = ? AND category IN ('episodic', 'event')
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (chat_id, limit),
+            )
+            return [
+                MemoryEntry(
+                    id=int(r[0]),
+                    chat_id=int(r[1]),
+                    category=str(r[2]),
+                    subject=str(r[3]),
+                    content=str(r[4]),
+                    participants=str(r[5]),
+                    importance=float(r[6]),
+                    created_at=float(r[7]),
+                    updated_at=float(r[8]),
+                    score=1.0,
+                )
+                for r in cursor.fetchall()
+            ]
+
     def ingest_passive_turn(
         self,
         chat_id: int,
@@ -1403,14 +1542,18 @@ class HybridMemoryManager:
     ) -> MemoryEntry | None:
         """
         Passively evaluate an incoming turn via Smart Noise Gate.
-        Meaningful turns are buffered per chat and indexed as an episodic scene
-        once `episode_chunk_size` turns accumulate (or when time gap > `episode_max_gap_seconds`).
+        Captures chat style / vernacular pearls and buffers turns into episodic scenes.
         """
         if not is_meaningful_message(content):
             return None
 
         now = time.time()
         speaker = (user_name or "User").strip()
+
+        # Passively record vernacular and chat style pearls
+        if not is_bot_identity(speaker):
+            self.record_chat_style(chat_id, speaker, content, user_id=user_id)
+
         buf = self._episode_buffers.setdefault(chat_id, [])
 
         # If buffer has old turns and gap exceeded, flush previous episode first
@@ -1486,6 +1629,13 @@ class HybridMemoryManager:
             d_row = cursor.fetchone()
             dossier_cnt = int(d_row[0] or 0) if d_row else 0
 
+            cursor.execute(
+                "SELECT COUNT(*) FROM ai_chat_style WHERE chat_id = ?",
+                (chat_id,),
+            )
+            s_row = cursor.fetchone()
+            style_cnt = int(s_row[0] or 0) if s_row else 0
+
             buffered_cnt = len(self._episode_buffers.get(chat_id, []))
             return MemoryStats(
                 chat_id=chat_id,
@@ -1494,10 +1644,11 @@ class HybridMemoryManager:
                 episodic_count=ep_cnt,
                 dossier_count=dossier_cnt,
                 buffered_turns=buffered_cnt,
+                style_count=style_cnt,
             )
 
     def clear_long_term_memory(self, chat_id: int) -> int:
-        """Delete all long-term memories, FTS entries, dossiers, and buffers for `chat_id`."""
+        """Delete all long-term memories, FTS entries, dossiers, style samples, and buffers for `chat_id`."""
         self._episode_buffers.pop(chat_id, None)
         with self._lock:
             cursor = self._conn.cursor()
@@ -1506,8 +1657,10 @@ class HybridMemoryManager:
             self._conn.execute("DELETE FROM ai_memories_fts WHERE chat_id = ?", (chat_id,))
             cursor.execute("DELETE FROM ai_user_dossiers WHERE chat_id = ?", (chat_id,))
             deleted_dos = cursor.rowcount
+            cursor.execute("DELETE FROM ai_chat_style WHERE chat_id = ?", (chat_id,))
+            deleted_style = cursor.rowcount
             self._conn.commit()
-            return deleted_mem + deleted_dos
+            return deleted_mem + deleted_dos + deleted_style
 
     def build_memory_context_block(
         self,
@@ -1517,16 +1670,57 @@ class HybridMemoryManager:
         active_user_name: str | None = None,
         max_lore_chars: int = 500,
         max_dossier_chars: int = 500,
-        max_memories_chars: int = 1000,
+        max_style_chars: int = 400,
+        max_events_chars: int = 500,
+        max_memories_chars: int = 800,
     ) -> str:
         """
-        Build the dynamic XML memory injection block (`<tavern_lore>`, `<user_dossiers>`,
-        `<retrieved_memories>`) strictly bounded by token/character budgets.
+        Build the dynamic XML memory injection block:
+        <chat_vernacular_and_style>, <recent_chat_events>, <tavern_lore>, <user_dossiers>, <retrieved_memories>
+        strictly bounded by token/character budgets.
         Returns an empty string if no memories exist for the chat.
         """
         sections: list[str] = []
 
-        # 1. Tavern Lore & Facts
+        # 1. Chat Style & Vernacular Pearls (Real quotes & speech patterns from regulars)
+        style_samples = self.get_chat_style_samples(chat_id, limit=6)
+        if style_samples:
+            style_lines: list[str] = []
+            used_chars = 0
+            for s in style_samples:
+                line = f'- [{s["user_name"]}]: "{s["phrase"]}"'
+                if used_chars + len(line) > max_style_chars and style_lines:
+                    break
+                style_lines.append(line)
+                used_chars += len(line) + 1
+            if style_lines:
+                sections.append(
+                    "<chat_vernacular_and_style>\n"
+                    "Characteristic speech patterns, humor, and quotes from chat regulars (adopt this tone, slang, vocabulary, and conciseness):\n"
+                    + "\n".join(style_lines)
+                    + "\n</chat_vernacular_and_style>"
+                )
+
+        # 2. Recent Chat Events & Topics (What regulars recently discussed)
+        recent_events = self.get_recent_events(chat_id, limit=2)
+        if recent_events:
+            events_lines: list[str] = []
+            used_chars = 0
+            for ev in recent_events:
+                line = f"- [{ev.subject}]\n{ev.content}" if ev.subject else f"- {ev.content}"
+                if used_chars + len(line) > max_events_chars and events_lines:
+                    break
+                events_lines.append(line)
+                used_chars += len(line) + 1
+            if events_lines:
+                sections.append(
+                    "<recent_chat_events>\n"
+                    "Recent discussions, events, and dialogue in the tavern:\n"
+                    + "\n".join(events_lines)
+                    + "\n</recent_chat_events>"
+                )
+
+        # 3. Tavern Lore & Facts
         lore_items = self.get_chat_lore(chat_id, limit=6)
         if lore_items:
             lore_lines: list[str] = []
@@ -1540,7 +1734,7 @@ class HybridMemoryManager:
             if lore_lines:
                 sections.append("<tavern_lore>\n" + "\n".join(lore_lines) + "\n</tavern_lore>")
 
-        # 2. User Dossiers (active speaker + mentioned members)
+        # 4. User Dossiers (active speaker + mentioned members)
         dossiers = self.get_user_dossiers(
             chat_id,
             active_user_id=active_user_id,
@@ -1564,8 +1758,8 @@ class HybridMemoryManager:
                     "<user_dossiers>\n" + "\n".join(dossier_lines) + "\n</user_dossiers>"
                 )
 
-        # 3. Hybrid RAG Retrieved Memories (Top-3 with score >= DEFAULT_RAG_MIN_SCORE)
-        lore_ids = {item.id for item in lore_items}
+        # 5. Hybrid RAG Retrieved Memories (Top-3 with score >= DEFAULT_RAG_MIN_SCORE, excluding already shown)
+        shown_ids = {item.id for item in lore_items} | {ev.id for ev in recent_events}
         retrieved = self.search_memories(
             chat_id,
             query=query,
@@ -1573,7 +1767,7 @@ class HybridMemoryManager:
             min_score=DEFAULT_RAG_MIN_SCORE,
             exclude_exact=query,
         )
-        filtered_retrieved = [m for m in retrieved if m.id not in lore_ids]
+        filtered_retrieved = [m for m in retrieved if m.id not in shown_ids]
         if filtered_retrieved:
             mem_lines: list[str] = []
             used_chars = 0

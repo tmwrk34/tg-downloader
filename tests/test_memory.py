@@ -45,7 +45,9 @@ def test_smart_noise_gate():
     assert is_meaningful_message("база") is False
     assert is_meaningful_message("ок") is False
     assert is_meaningful_message("++") is False
-    assert is_meaningful_message("Привіт всім") is False  # < 25 chars
+    assert is_meaningful_message("Привіт") is False  # single word without punctuation
+    assert is_meaningful_message("Житомира не існує") is True  # short punchline
+    assert is_meaningful_message("Знову павуки винні") is True  # chat pearl
 
     # Accepts meaningful conversational turns
     assert (
@@ -403,7 +405,7 @@ async def test_agentic_memory_tool_calls(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_direct_reply_to_bot_routes_to_munito_ai(tmp_path: Path):
+async def test_reply_to_bot_does_not_route_ai_unless_tagged(tmp_path: Path):
     db_file = tmp_path / "test_reply_route.db"
     svc = MunitoAIService(api_key="valid_key", db_path=db_file)
     chat_id = -100444
@@ -423,7 +425,7 @@ async def test_direct_reply_to_bot_routes_to_munito_ai(tmp_path: Path):
         text="Якої ти думки про новий патч?",
     )
 
-    # Human replies directly to bot's message WITHOUT typing @bard_taverna_bot
+    # 1. Human replies directly to bot's message WITHOUT typing @bard_taverna_bot -> must NOT trigger AI
     reply_msg = Message(
         message_id=11,
         date=datetime.datetime.now(datetime.UTC),
@@ -438,9 +440,23 @@ async def test_direct_reply_to_bot_routes_to_munito_ai(tmp_path: Path):
         patch("handlers.ai._handle_ai_mention", new_callable=AsyncMock) as mock_ai_mention,
     ):
         await chatter_message_listener(reply_msg, active_bot=fake_bot)
-        mock_ai_mention.assert_awaited_once_with(
-            reply_msg, "Думаю, баланс класів став значно кращим!", fake_bot
-        )
+        mock_ai_mention.assert_not_awaited()
+
+    # 2. Human explicitly tags @bard_taverna_bot -> MUST trigger AI
+    mention_msg = Message(
+        message_id=12,
+        date=datetime.datetime.now(datetime.UTC),
+        chat=chat,
+        from_user=human_user,
+        text="@bard_taverna_bot як справи?",
+    ).as_(fake_bot)
+
+    with (
+        patch("handlers.ai.bot.munito_service", svc),
+        patch("handlers.ai._handle_ai_mention", new_callable=AsyncMock) as mock_ai_mention,
+    ):
+        await chatter_message_listener(mention_msg, active_bot=fake_bot)
+        mock_ai_mention.assert_awaited_once_with(mention_msg, "як справи?", fake_bot)
 
     svc.close()
 
@@ -659,5 +675,89 @@ async def test_memory_command_dedup_and_forget(tmp_path: Path):
             msg, CommandObject(prefix="/", command="memory", args="dossier delete Бард")
         )
         assert "Completely deleted dossier" in mock_reply.call_args[0][0]
+
+    svc.close()
+
+
+@pytest.mark.asyncio
+async def test_chat_style_and_events_learning(tmp_path: Path):
+    """Test passive learning of chat vernacular/style and event context injection."""
+    db_file = tmp_path / "test_style.db"
+    svc = MunitoAIService(api_key="test_key", db_path=db_file)
+    chat_id = -100888
+
+    # 1. Test record_chat_style directly
+    saved = await svc.record_chat_style(chat_id, "Illya", "Та шо ти кажеш, знову павуки винні")
+    assert saved is True
+    # Duplicate or similar rejected
+    dup = await svc.record_chat_style(chat_id, "Illya", "та шо ти кажеш, знову павуки")
+    assert dup is False
+    # Bot identity rejected
+    bot_saved = await svc.record_chat_style(chat_id, "Бард", "Я наливаю ель")
+    assert bot_saved is False
+
+    samples = await svc.get_chat_style_samples(chat_id)
+    assert len(samples) == 1
+    assert samples[0]["user_name"] == "Illya"
+    assert "павуки" in samples[0]["phrase"]
+
+    # 2. Test passive ingestion of turns and episode chunk creation
+    # Ingest 5 meaningful turns to trigger episode chunk flush
+    turns = [
+        ("Illya", "Хто сьогодні йде в підземелля на дракона?"),
+        ("Emel'en", "Я тільки якщо там є бочка свіжого елю."),
+        ("Farid", "М'ясник бере свій тесак і готовий."),
+        ("Illya", "Беремо ель і вирушаємо прямо зараз!"),
+        ("Emel'en", "По конях, панове шукачі пригод!"),
+    ]
+    for user_name, text in turns:
+        svc.memory_manager.ingest_passive_turn(
+            chat_id=chat_id,
+            user_name=user_name,
+            user_id=123,
+            content=text,
+        )
+
+    stats = await svc.get_memory_stats(chat_id)
+    assert stats.episodic_count >= 1
+    assert stats.style_count >= 1
+
+    # 3. Test build_memory_context_block includes both style and recent events
+    context_block = svc.memory_manager.build_memory_context_block(
+        chat_id=chat_id,
+        query="Куди ми йдемо?",
+        active_user_name="Illya",
+    )
+    assert "<chat_vernacular_and_style>" in context_block
+    assert "Illya" in context_block
+    assert "<recent_chat_events>" in context_block
+    assert "підземелля" in context_block or "дракона" in context_block
+
+    # 4. Test /memory style command
+    fake_bot = AsyncMock()
+    chat = Chat(id=chat_id, type="supergroup", title="Test Tavern")
+    user = User(id=999, is_bot=False, first_name="Illya")
+    msg = Message(
+        message_id=60,
+        date=datetime.datetime.now(datetime.UTC),
+        chat=chat,
+        from_user=user,
+        text="/memory",
+    ).as_(fake_bot)
+
+    with (
+        patch("handlers.ai.bot.munito_service", svc),
+        patch.object(Message, "reply", new_callable=AsyncMock) as mock_reply,
+    ):
+        await memory_command_handler(
+            msg, CommandObject(prefix="/", command="memory", args="style Житомир — це міф!")
+        )
+        assert "Recorded chat pearl" in mock_reply.call_args[0][0]
+
+    # 5. Clear wipes style samples
+    await svc.clear_long_term_memory(chat_id)
+    clean_stats = await svc.get_memory_stats(chat_id)
+    assert clean_stats.style_count == 0
+    assert clean_stats.episodic_count == 0
 
     svc.close()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 import re
@@ -330,49 +331,32 @@ async def memory_command_handler(message: Message, command: CommandObject | None
         )
         return
 
-    if subcmd in {"dedup", "дедуп"} or (
-        subcmd in {"dossier", "dossiers", "досьє"} and rest.lower() == "dedup"
-    ):
-        cleaned = await bot.munito_service.deduplicate_user_dossiers(chat_id)
-        dossiers = await bot.munito_service.get_user_dossiers(chat_id, limit=10)
-        lines = [
-            f"🧹 <b>Dossier Deduplication Complete!</b> (Cleaned/merged {cleaned} items)\n",
-            "🎭 <b>Cleaned Member Dossiers:</b>",
-        ]
-        if dossiers:
-            for d in dossiers:
-                uname = f" (@{html.escape(d.username)})" if d.username else ""
-                traits = "; ".join(html.escape(t) for t in d.traits)
-                lines.append(f"• <b>{html.escape(d.display_name)}</b>{uname}: {traits}")
-        else:
-            lines.append("<i>No member dossiers recorded yet.</i>")
-        await safe_reply(message, "\n".join(lines), parse_mode="HTML")
-        return
-
-    if subcmd in {"forget", "delete", "remove", "видалити", "забудь"}:
+    if subcmd in {"style", "стиль", "перл", "pearl"}:
         if not rest:
             await safe_reply(
                 message,
-                "🗑 Usage: <code>/memory forget &lt;query or trait&gt;</code>",
+                "💬 Usage: <code>/memory style &lt;phrase or pearl&gt;</code>",
                 parse_mode="HTML",
             )
             return
-        removed_memories = await bot.munito_service.forget_memory(chat_id, rest)
-        removed_dossier_traits = await bot.munito_service.forget_dossier_traits(chat_id, rest)
-        total = len(removed_memories) + len(removed_dossier_traits)
-        if total == 0:
+        saved = await bot.munito_service.record_chat_style(
+            chat_id=chat_id,
+            user_name=user_name,
+            phrase=rest,
+            user_id=user_id,
+        )
+        if saved:
             await safe_reply(
                 message,
-                f"ℹ️ Nothing found to forget matching <code>{html.escape(rest)}</code> in lore or dossiers.",
+                f'💬 <b>Recorded chat pearl:</b> <i>"{html_lib.escape(rest)}"</i>',
                 parse_mode="HTML",
             )
-            return
-        lines = [f"🗑 <b>Forgotten {total} items matching</b> <code>{html.escape(rest)}</code>:"]
-        for m in removed_memories:
-            lines.append(f"• [Lore/Episode] {html.escape(m.content)}")
-        for dt in removed_dossier_traits:
-            lines.append(f"• [Dossier: {html.escape(dt['user_name'])}] {html.escape(dt['trait'])}")
-        await safe_reply(message, "\n".join(lines), parse_mode="HTML")
+        else:
+            await safe_reply(
+                message,
+                f'ℹ️ Pearl was already recorded or invalid: <i>"{html_lib.escape(rest)}"</i>',
+                parse_mode="HTML",
+            )
         return
 
     if subcmd in {"dedup", "дедуп"} or (
@@ -745,7 +729,6 @@ async def chatter_message_listener(message: Message, active_bot: Bot | None = No
         return
 
     current_bot = active_bot or message.bot
-    bot_user = await bot._get_cached_bot_user(current_bot) if current_bot else None
 
     # 1. Explicit mention check for Munito AI assistant
     if current_bot:
@@ -754,45 +737,38 @@ async def chatter_message_listener(message: Message, active_bot: Bot | None = No
             await _handle_ai_mention(message, prompt, current_bot)
             return
 
-    is_reply_to_bot = bool(
-        message.reply_to_message
-        and message.reply_to_message.from_user
-        and bot_user
-        and message.reply_to_message.from_user.id == bot_user.id
-    )
-
-    # 2. Direct reply to a bot message routes to Munito AI when configured & enabled
-    if is_reply_to_bot and current_bot and bot.munito_service.is_configured:
-        try:
-            ai_cfg = await bot.munito_service.get_chat_config(message.chat.id)
-            if ai_cfg.enabled:
-                await _handle_ai_mention(message, raw_text.strip(), current_bot)
-                return
-        except Exception as e:
-            logger.debug("Failed checking AI config on direct reply: %s", e)
-
-    # 3. Passive conversational memory capture when mode is 'all'
+    # 2. Passive conversational memory & chat style capture
     if bot.munito_service.is_configured:
         try:
             ai_cfg = await bot.munito_service.get_chat_config(message.chat.id)
-            if ai_cfg.enabled and ai_cfg.context_size > 0 and ai_cfg.context_mode == "all":
+            if ai_cfg.enabled:
                 sender_name = message.from_user.first_name if message.from_user else "User"
                 sender_id = message.from_user.id if message.from_user else None
                 rec_text = raw_text
                 if message.photo:
                     rec_text = f"[Photo attached] {raw_text}".strip()
-                await bot.munito_service.record_turn(
-                    chat_id=message.chat.id,
-                    role="user",
-                    content=rec_text,
-                    user_id=sender_id,
-                    user_name=sender_name,
-                    has_image=bool(message.photo),
-                )
-        except Exception as e:
-            logger.debug("Failed to passively record message in AI context: %s", e)
 
-    # 4. Only text messages without @bot tag participate in Markov chatterbot
+                if ai_cfg.context_size > 0 and ai_cfg.context_mode == "all":
+                    await bot.munito_service.record_turn(
+                        chat_id=message.chat.id,
+                        role="user",
+                        content=rec_text,
+                        user_id=sender_id,
+                        user_name=sender_name,
+                        has_image=bool(message.photo),
+                    )
+                else:
+                    await asyncio.to_thread(
+                        bot.munito_service.memory_manager.ingest_passive_turn,
+                        chat_id=message.chat.id,
+                        user_name=sender_name,
+                        user_id=sender_id,
+                        content=rec_text,
+                    )
+        except Exception as e:
+            logger.debug("Failed to passively ingest message into AI memory/style: %s", e)
+
+    # 3. Only text messages without @bot tag participate in Markov chatterbot
     if not message.text:
         return
 
@@ -812,14 +788,12 @@ async def chatter_message_listener(message: Message, active_bot: Bot | None = No
     text_lower = message.text.lower()
     is_chatter_keyword = bool("бард" in text_lower or "дурачок" in text_lower)
 
-    if bot.chatter_service.should_reply(
-        cfg, is_mention_or_reply=(is_chatter_keyword or is_reply_to_bot)
-    ):
+    if bot.chatter_service.should_reply(cfg, is_mention_or_reply=is_chatter_keyword):
         reply_sentence = await bot.chatter_service.generate(message.chat.id, seed_text=message.text)
         if reply_sentence:
             await bot.chatter_service.record_reply(message.chat.id)
             await safe_reply(message, reply_sentence)
-        elif is_chatter_keyword or is_reply_to_bot:
+        elif is_chatter_keyword:
             await safe_reply(
                 message,
                 "<i>*Blinks confusedly...*</i>\n"
