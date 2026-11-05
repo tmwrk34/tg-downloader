@@ -189,6 +189,11 @@ class MediaDownloaderCore:
             "socket_timeout": 30,
             "concurrent_fragment_downloads": 2,
             "postprocessor_args": {"ffmpeg": ["-threads", "2"]},
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "ios", "tv", "web"],
+                }
+            },
         }
         cookie_file = self._get_cookie_file()
         if cookie_file:
