@@ -244,6 +244,8 @@ class MediaDownloaderCore:
                 formats=slim_formats,
                 is_gallery=is_gallery,
                 gallery_count=gallery_count,
+                is_live=bool(info.get("is_live")),
+                live_status=info.get("live_status"),
             )
 
     async def extract_metadata(
@@ -283,32 +285,64 @@ class MediaDownloaderCore:
             clean_track = info.get("track") or info.get("title")
             entries = list(info.get("entries") or [])
 
+            extractor = (info.get("extractor") or "").lower()
+            is_youtube = "youtube" in extractor or "youtu.be" in url or "youtube.com" in url
+            v_formats = [f for f in info.get("formats", []) if f.get("vcodec") != "none"]
+            a_formats = [f for f in info.get("formats", []) if f.get("acodec") != "none"]
+
+            # Guard: YouTube videos/streams are never photo posts. If no video/audio formats exist, it's unavailable.
+            if is_youtube and not v_formats and not a_formats:
+                reason = "This YouTube video is not available (no downloadable video or audio streams found)."
+                if info.get("is_live") or info.get("live_status") == "is_live":
+                    reason = "This is an active live stream. Downloading active live streams is not supported."
+                elif info.get("live_status") == "is_upcoming":
+                    reason = "This is an upcoming YouTube live stream that has not started yet."
+                elif info.get("live_status") == "was_live":
+                    reason = "This YouTube live stream has ended, but no recording or VOD was published by the author."
+                raise ValueError(reason)
+
             # Case 1: Multi-item gallery or carousel (e.g. Instagram carousel)
             if entries:
                 gallery_items: list[tuple[str, Path]] = []
                 total_filesize = 0
                 for idx, entry in enumerate(entries):
-                    v_formats = [f for f in entry.get("formats", []) if f.get("vcodec") != "none"]
-                    if v_formats:
+                    entry_v_formats = [
+                        f for f in entry.get("formats", []) if f.get("vcodec") != "none"
+                    ]
+                    if entry_v_formats:
                         best_v = max(
-                            v_formats, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0)
+                            entry_v_formats, key=lambda f: (f.get("height") or 0, f.get("tbr") or 0)
                         )
                         item_path = temp_dir / f"item_{idx:02d}_{entry.get('id', 'media')}.mp4"
                         download_url_to_file(best_v["url"], item_path)
                         total_filesize += item_path.stat().st_size
                         gallery_items.append(("video", item_path))
                     elif entry.get("thumbnails"):
-                        best_t = max(
-                            entry["thumbnails"],
+                        candidates = sorted(
+                            [t for t in entry["thumbnails"] if t.get("url")],
                             key=lambda t: (
                                 t.get("preference") or 0,
                                 (t.get("width") or 0) * (t.get("height") or 0),
                             ),
+                            reverse=True,
                         )
                         item_path = temp_dir / f"item_{idx:02d}_{entry.get('id', 'media')}.jpg"
-                        download_url_to_file(best_t["url"], item_path)
-                        total_filesize += item_path.stat().st_size
-                        gallery_items.append(("photo", item_path))
+                        downloaded_entry = False
+                        for t in candidates:
+                            try:
+                                download_url_to_file(t["url"], item_path)
+                                downloaded_entry = True
+                                break
+                            except Exception as exc:
+                                logger.debug(
+                                    "Failed downloading gallery candidate thumbnail %s: %s",
+                                    t.get("url"),
+                                    exc,
+                                )
+
+                        if downloaded_entry:
+                            total_filesize += item_path.stat().st_size
+                            gallery_items.append(("photo", item_path))
 
                 if gallery_items:
                     return DownloadedMedia(
@@ -326,19 +360,33 @@ class MediaDownloaderCore:
                         gallery_items=gallery_items,
                     )
 
-            # Case 2: Single photo post without video or audio formats
-            v_formats = [f for f in info.get("formats", []) if f.get("vcodec") != "none"]
-            a_formats = [f for f in info.get("formats", []) if f.get("acodec") != "none"]
-            if not v_formats and not a_formats and info.get("thumbnails"):
-                best_t = max(
-                    info["thumbnails"],
+            # Case 2: Single photo post without video or audio formats (not applicable to YouTube)
+            if not v_formats and not a_formats and info.get("thumbnails") and not is_youtube:
+                candidates = sorted(
+                    [t for t in info["thumbnails"] if t.get("url")],
                     key=lambda t: (
                         t.get("preference") or 0,
                         (t.get("width") or 0) * (t.get("height") or 0),
                     ),
+                    reverse=True,
                 )
                 photo_path = temp_dir / f"{info.get('id', 'photo')}.jpg"
-                download_url_to_file(best_t["url"], photo_path)
+                downloaded_photo = False
+                for t in candidates:
+                    try:
+                        download_url_to_file(t["url"], photo_path)
+                        downloaded_photo = True
+                        break
+                    except Exception as exc:
+                        logger.debug(
+                            "Failed downloading candidate thumbnail %s: %s", t.get("url"), exc
+                        )
+
+                if not downloaded_photo:
+                    raise ValueError(
+                        f"Failed to download image from {url}: all thumbnail URLs returned errors."
+                    )
+
                 return DownloadedMedia(
                     filepath=photo_path,
                     title=info.get("title") or "photo",
