@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -664,3 +665,126 @@ async def test_float_duration_width_height_conversion(core_downloader: MediaDown
         assert isinstance(meta.width, int)
         assert meta.height == 1920
         assert isinstance(meta.height, int)
+
+
+@pytest.mark.asyncio
+async def test_youtube_no_formats_raises_descriptive_error(core_downloader: MediaDownloaderCore):
+    """Verify YouTube videos without video/audio streams are never treated as photo posts."""
+    fake_info = {
+        "id": "Je9KuP0lV90",
+        "title": "Ended Live Stream",
+        "extractor": "youtube",
+        "formats": [
+            {"format_id": "sb0", "vcodec": "none", "acodec": "none"},
+        ],
+        "thumbnails": [
+            {"url": "https://i.ytimg.com/vi_webp/Je9KuP0lV90/maxresdefault.webp", "preference": 0},
+        ],
+        "live_status": "was_live",
+        "is_live": False,
+    }
+
+    with patch("downloader.core.yt_dlp.YoutubeDL") as mock_ydl_cls:
+        instance = MagicMock()
+        instance.extract_info.return_value = fake_info
+        mock_ydl_cls.return_value.__enter__.return_value = instance
+
+        with pytest.raises(ValueError, match="YouTube live stream has ended"):
+            await core_downloader.download("https://www.youtube.com/watch?v=Je9KuP0lV90")
+
+
+@pytest.mark.asyncio
+async def test_photo_thumbnail_fallback_on_404(core_downloader: MediaDownloaderCore):
+    """Verify single photo download falls back to lower-resolution thumbnail if top thumbnail 404s."""
+    import urllib.error
+
+    fake_info = {
+        "id": "photo_fallback_1",
+        "title": "Photo with Fallback",
+        "extractor": "instagram",
+        "formats": [],
+        "thumbnails": [
+            {
+                "url": "https://example.com/broken_maxres.jpg",
+                "preference": 2,
+                "width": 1080,
+                "height": 1080,
+            },
+            {
+                "url": "https://example.com/working_standard.jpg",
+                "preference": 1,
+                "width": 640,
+                "height": 640,
+            },
+        ],
+    }
+
+    with (
+        patch("downloader.core.yt_dlp.YoutubeDL") as mock_ydl_cls,
+        patch("downloader.core.download_url_to_file") as mock_dl,
+    ):
+        instance = MagicMock()
+        instance.extract_info.return_value = fake_info
+        mock_ydl_cls.return_value.__enter__.return_value = instance
+
+        def fake_download_url(url, dest_path):
+            if "broken" in url:
+                raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+            dest_path.write_bytes(b"working_image_data")
+
+        mock_dl.side_effect = fake_download_url
+
+        downloaded = await core_downloader.download("https://instagram.com/p/fallback_test")
+        assert downloaded.is_gallery is False
+        assert downloaded.filesize == len(b"working_image_data")
+        downloaded.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_youtube_handler_no_formats_warning():
+    """Verify media_url_handler informs user when YouTube video has no streams instead of showing buttons."""
+    from unittest.mock import AsyncMock
+
+    from aiogram.types import Chat, Message, User
+
+    from downloader.models import MediaMetadata
+    from downloader.platforms.youtube import YouTubeService
+    from handlers.downloader import media_url_handler
+    from utils.proxy import bot_proxy as bot
+
+    fake_bot = AsyncMock()
+    chat = Chat(id=-100123, type="supergroup", title="Test Tavern")
+    user = User(id=999, is_bot=False, first_name="User")
+    msg = Message(
+        message_id=1,
+        date=datetime.datetime.now(datetime.UTC),
+        chat=chat,
+        from_user=user,
+        text="https://www.youtube.com/watch?v=Je9KuP0lV90",
+    ).as_(fake_bot)
+
+    meta_no_formats = MediaMetadata(
+        title="Ended Live Stream",
+        duration=None,
+        extractor="youtube",
+        formats=[{"format_id": "sb0", "vcodec": "none", "acodec": "none"}],
+        live_status="was_live",
+        is_live=False,
+    )
+
+    yt_service = YouTubeService(core=MagicMock())
+    yt_service.extract_metadata = AsyncMock(return_value=meta_no_formats)
+
+    status_msg = AsyncMock()
+
+    with (
+        patch.object(bot.platform_registry, "get_service_by_name", return_value=yt_service),
+        patch("handlers.downloader.safe_reply", new_callable=AsyncMock) as mock_safe_reply,
+    ):
+        mock_safe_reply.return_value = status_msg
+        await media_url_handler(msg, "https://www.youtube.com/watch?v=Je9KuP0lV90", "youtube")
+
+        status_msg.edit_text.assert_awaited_once()
+        call_text = status_msg.edit_text.call_args[0][0]
+        assert "YouTube video is not available" in call_text
+        assert "live stream has ended" in call_text

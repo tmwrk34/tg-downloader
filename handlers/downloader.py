@@ -438,6 +438,24 @@ async def media_url_handler(message: Message, url: str, platform: str) -> None:
                 else:
                     meta = await service.extract_metadata(url)
                     _cache_youtube_metadata(video_id, meta)
+
+                v_fmts = [f for f in meta.formats if f.get("vcodec") and f.get("vcodec") != "none"]
+                a_fmts = [f for f in meta.formats if f.get("acodec") and f.get("acodec") != "none"]
+                if not v_fmts and not a_fmts:
+                    reason = "The video may be an unarchived live stream, private, region-restricted, or removed."
+                    if meta.is_live or meta.live_status == "is_live":
+                        reason = "This is an active live stream. Downloading active live streams is not supported."
+                    elif meta.live_status == "is_upcoming":
+                        reason = "This is an upcoming live stream that has not started yet."
+                    elif meta.live_status == "was_live":
+                        reason = "This YouTube live stream has ended, but no recording or VOD was published by the author."
+
+                    await status_msg.edit_text(
+                        f"⚠️ <b>YouTube video is not available:</b>\n{reason}",
+                        parse_mode="HTML",
+                    )
+                    return
+
                 dur_str = format_duration(meta.duration)
 
                 # Cap video duration at 3 hours

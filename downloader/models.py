@@ -24,6 +24,8 @@ class MediaMetadata:
     formats: list[dict[str, Any]] = field(default_factory=list)
     is_gallery: bool = False
     gallery_count: int = 0
+    is_live: bool = False
+    live_status: str | None = None
 
 
 @dataclass
